@@ -202,7 +202,7 @@
   }
 
   /**
-     * 1. 輪郭追跡を行い、線ごとに色分け描画した上で、座標の多重配列を返す関数（修正版）
+     * 1. 輪郭追跡を行い、1pixelずつ確実に色分け描画した上で、座標の多重配列を返す関数
      * @param {HTMLCanvasElement} binCanvas - 二値化キャンバス
      * @param {HTMLCanvasElement} bndCanvas - 境界線描画先キャンバス
      * @returns {Array<Array<{x:number, y:number}>>} 追跡されたすべての線の配列
@@ -213,6 +213,7 @@
     const width = binCanvas.width;
     const height = binCanvas.height;
 
+    // 背景を白で初期化
     bndCtx.fillStyle = "white";
     bndCtx.fillRect(0, 0, width, height);
 
@@ -226,11 +227,12 @@
       return binData[idx] < 128 && binData[idx + 3] > 0;
     }
 
-    // 【ステップ1】エッジ抽出
+    // 【ステップ1】1px幅の綺麗なエッジマップを作成
     const isEdge = Array.from({ length: height }, () => new Uint8Array(width));
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         if (isBlackPixel(x, y)) {
+          // 上下左右のいずれかが白（または画面外）なら輪郭ピクセル
           if (!isBlackPixel(x, y - 1) || !isBlackPixel(x, y + 1) ||
             !isBlackPixel(x - 1, y) || !isBlackPixel(x + 1, y)) {
             isEdge[y][x] = 1;
@@ -239,30 +241,29 @@
       }
     }
 
-    // 【ステップ2】時計回りに外周を厳密にトレースする
+    // 【ステップ2】外周トレース処理
     const visited = Array.from({ length: height }, () => new Uint8Array(width));
     const allLines = [];
 
-    // 8方向の定義（真右から時計回り）
+    // 8方向の定義（0:右, 1:右下, 2:下, 3:左下, 4:左, 5:左上, 6:上, 7:右上）
     const dx = [1, 1, 0, -1, -1, -1, 0, 1];
     const dy = [0, 1, 1, 1, 0, -1, -1, -1];
 
-    const colors = ["#CD5C5C", "#F08080", "#FA8072", "#E9967A", "#FFA07A", "#DC143C", "#B22222", "#8B0000", "#FF7F50", "#FF6347", "#FF4500"];
+    const colors = ["#FFA07A", "#E9967A", "#FA8072", "#F08080", "#CD5C5C", "#FF7F50", "#FF6347", "#FF4500", "#DC143C", "#B22222", "#8B0000"];
     let colorIndex = 0;
 
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        // 未訪問のエッジを見つけたら追跡開始
+        // 未訪問のエッジを見つけたら、そこから一本の線を追跡開始
         if (isEdge[y][x] && !visited[y][x]) {
 
           const currentPath = [];
           let cx = x;
           let cy = y;
 
-          // 侵入方向（最初は左から右へ入ってきたと仮定）
+          // 初期侵入方向（左から右へスキャンして見つけたため、最初は右方向を基準にする）
           let dir = 0;
 
-          // ループ検出用のスタート座標記憶
           const startX = x;
           const startY = y;
 
@@ -272,15 +273,14 @@
 
             let foundNext = false;
 
-            // 前に進んだ方向の「左後ろ（dir + 5）」から時計回りに8方向を検査
-            // これにより、分岐があっても常に最も「外側」の輪郭をなぞるようになります
+            // 左後ろ（dir + 5）から時計回りに周囲8マスを走査
             for (let i = 0; i < 8; i++) {
               const nextDir = (dir + 5 + i) % 8;
               const nx = cx + dx[nextDir];
               const ny = cy + dy[nextDir];
 
-              if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-                // スタート地点に戻ってきた場合は、訪問済みであっても結合するために許可する
+              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                // スタート地点に戻ってきた場合（ループの結合判定）
                 if (nx === startX && ny === startY && currentPath.length > 2) {
                   currentPath.push({ x: startX, y: startY });
                   foundNext = true;
@@ -289,38 +289,38 @@
                   break;
                 }
 
-                // 未訪問のエッジピクセルがあればそちらへ進む
+                // 未訪問の輪郭ピクセルを発見
                 if (isEdge[ny][nx] && !visited[ny][nx]) {
                   cx = nx;
                   cy = ny;
-                  dir = nextDir; // 向かった方向を次の基準にする
+                  dir = nextDir;
                   foundNext = true;
                   break;
                 }
               }
             }
 
-            // 次のピクセルが見つからない、またはスタートに戻ったらこのパスは終了
+            // 次のピクセルがない、またはスタート地点に完全に融合したら追跡終了
             if (!foundNext || (cx === startX && cy === startY)) {
               break;
             }
           }
 
-          // ノイズ（1〜2マスだけの孤立点）でなければ登録して描画
+          // 【ステップ3】1pixelずつ確実にキャンバスへ塗る処理
+          // 2ピクセル以下の極小ノイズでなければ描画・登録
           if (currentPath.length > 2) {
             allLines.push(currentPath);
 
+            // この線専用の色を決定
             const strokeColor = colors[colorIndex % colors.length];
             colorIndex++;
 
-            bndCtx.beginPath();
-            bndCtx.strokeStyle = strokeColor;
-            bndCtx.lineWidth = 1;
-            bndCtx.moveTo(currentPath[0].x, currentPath[0].y);
-            for (let i = 1; i < currentPath.length; i++) {
-              bndCtx.lineTo(currentPath[i].x, currentPath[i].y);
+            // ctx.lineTo は斜め移動時に見た目がかすれることがあるため、
+            // 座標配列から1ピクセルずつ 1x1 の正方形として確実に塗りつぶします
+            bndCtx.fillStyle = strokeColor;
+            for (let i = 0; i < currentPath.length; i++) {
+              bndCtx.fillRect(currentPath[i].x, currentPath[i].y, 1, 1);
             }
-            bndCtx.stroke();
           }
         }
       }
@@ -328,7 +328,6 @@
 
     return allLines;
   }
-
   /**
    * 2. 受け取ったすべての線をダグラス・ペッカー法で間引き、Meshpoint Canvas に打点する関数
    * @param {HTMLCanvasElement} mshCanvas - メッシュポイント描画先キャンバス
