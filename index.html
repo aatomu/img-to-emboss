@@ -69,6 +69,7 @@
   const canvas_width = 360;
   const canvas_height = 640;
   const binarization_threshold = 128; // この値より明るければ白、暗ければ黒
+  const colors = ["#FFA07A", "#E9967A", "#FA8072", "#F08080", "#CD5C5C", "#FF7F50", "#FF6347", "#FF4500", "#DC143C", "#B22222", "#8B0000"];
 
   const source = document.getElementById("source");
   const render_canvas = document.getElementById("render_canvas");
@@ -92,12 +93,13 @@
     drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
     // 2. 二値化処理
     applyBinarization(render_canvas, binarization_canvas, binarization_threshold);
-    // 3. 輪郭を追跡して二次元配列で取得 ＆ Boundary Canvas を色分け描画
-    // 戻り値 lines の型: [ [{x,y}, {x,y}, ...], [{x,y}, ...], ... ]
+    // 3. 輪郭抽出
     const lines = extractAndTraceBoundary(binarization_canvas, boundary_canvas);
-    console.log(lines)
-    // 4. 取得したすべての線を一括で間引き ＆ Meshpoint Canvas に描画
-    simplifyPoints(meshpoint_canvas, lines, 0);
+    console.log("元の輪郭データ:", lines);
+
+    // 4. 取得したすべての線を一括で間引き（epsilon = 2.0 に設定）＆ 戻り値を取得
+    const simplifiedLines = simplifyLines(meshpoint_canvas, lines, 0.5);
+    console.log("間引き後の頂点データ:", simplifiedLines);
   }
 
   source.onload = function () {
@@ -249,7 +251,6 @@
     const dx = [1, 1, 0, -1, -1, -1, 0, 1];
     const dy = [0, 1, 1, 1, 0, -1, -1, -1];
 
-    const colors = ["#FFA07A", "#E9967A", "#FA8072", "#F08080", "#CD5C5C", "#FF7F50", "#FF6347", "#FF4500", "#DC143C", "#B22222", "#8B0000"];
     let colorIndex = 0;
 
     for (let y = 0; y < height; y++) {
@@ -328,13 +329,15 @@
 
     return allLines;
   }
+
   /**
-   * 2. 受け取ったすべての線をダグラス・ペッカー法で間引き、Meshpoint Canvas に打点する関数
+   * 2. 受け取ったすべての線をダグラス・ペッカー法で間引き、Meshpoint Canvas にドットを描画して、間引いた線の配列を返す関数
    * @param {HTMLCanvasElement} mshCanvas - メッシュポイント描画先キャンバス
    * @param {Array<Array<{x:number, y:number}>>} lines - 線の多重配列
    * @param {number} epsilon - 間引きのしきい値
+   * @returns {Array<Array<{x:number, y:number}>>} 間引かれたすべての線の多重配列
    */
-  function simplifyPoints(mshCanvas, lines, epsilon = 0.5) {
+  function simplifyLines(mshCanvas, lines, epsilon = 2.0) {
     const mshCtx = mshCanvas.getContext("2d");
     const width = mshCanvas.width;
     const height = mshCanvas.height;
@@ -343,26 +346,50 @@
     mshCtx.fillStyle = "white";
     mshCtx.fillRect(0, 0, width, height);
 
-    mshCtx.fillStyle = "#FF0000";
+    // 指定されたカラーパレット
+    const colors = ["#FFA07A", "#E9967A", "#FA8072", "#F08080", "#CD5C5C", "#FF7F50", "#FF6347", "#FF4500", "#DC143C", "#B22222", "#8B0000"];
+
+    // 間引いた後のすべての線を格納する配列
+    const allSimplifiedLines = [];
 
     // 全ての線（パス）に対してループを回す
     for (let l = 0; l < lines.length; l++) {
       const path = lines[l];
+      if (path.length < 3) continue; // 点が少なすぎるパスはスキップ
 
-      // 各パスをダグラス・ペッカー法で間引き
-      const simplifiedPath = runDouglasPeucker(path, epsilon);
+      let simplifiedPath;
+      const start = path[0];
+      const end = path[path.length - 1];
 
-      // 間引かれた頂点を赤い丸で打点
+      // 閉じた輪郭（ループ）の分割処理
+      if (start.x === end.x && start.y === end.y) {
+        const mid = Math.floor(path.length / 2);
+        const part1 = runDouglasPeucker(path.slice(0, mid + 1), epsilon);
+        const part2 = runDouglasPeucker(path.slice(mid), epsilon);
+        simplifiedPath = part1.slice(0, part1.length - 1).concat(part2);
+      } else {
+        simplifiedPath = runDouglasPeucker(path, epsilon);
+      }
+
+      // 結果の配列に追加
+      allSimplifiedLines.push(simplifiedPath);
+
+      // このライン（line）専用の色を配列から決定
+      const strokeColor = colors[l % colors.length];
+      mshCtx.fillStyle = strokeColor;
+
+      // 間引かれた頂点を 1x1 のドットとして確実に塗りつぶす
       for (let i = 0; i < simplifiedPath.length; i++) {
-        mshCtx.beginPath();
-        mshCtx.arc(simplifiedPath[i].x, simplifiedPath[i].y, 1.5, 0, Math.PI * 2);
-        mshCtx.fill();
+        mshCtx.fillRect(simplifiedPath[i].x, simplifiedPath[i].y, 1, 1);
       }
     }
+
+    // 間引いた後の多重配列を返す
+    return allSimplifiedLines;
   }
 
   /**
-   * 3. ダグラス・ペッカー法（アルゴリズムの再帰ロジック本体）
+   * 3. ダグラス・ペッカー法（アルゴリズム本体の再帰ロジック）
    */
   function runDouglasPeucker(points, epsilon) {
     if (points.length <= 2) return points;
@@ -371,6 +398,7 @@
     let index = 0;
     const end = points.length - 1;
 
+    // 始点と終点を結ぶ直線から、最も遠い位置にある点（最大誤差の点）を探す
     for (let i = 1; i < end; i++) {
       const distance = getOrthogonalDistance(points[i], points[0], points[end]);
       if (distance > maxDistance) {
@@ -379,30 +407,36 @@
       }
     }
 
+    // 最大誤差がしきい値(epsilon)を超えている場合のみ、その点でパスを分割して再帰処理
     if (maxDistance > epsilon) {
       const results1 = runDouglasPeucker(points.slice(0, index + 1), epsilon);
       const results2 = runDouglasPeucker(points.slice(index), epsilon);
+      // 境界の重複点を排除して結合
       return results1.slice(0, results1.length - 1).concat(results2);
     } else {
+      // 誤差が十分に小さければ、中間の細かなギザギザ（曲線含む）はすべて直線とみなし両端だけ残す
       return [points[0], points[end]];
     }
   }
 
   /**
-   * 4. 点と直線の距離を計算するヘルパー
+   * 4. 点と直線の最短距離を計算するヘルパー（安全版）
    */
   function getOrthogonalDistance(point, lineStart, lineEnd) {
-    const area = Math.abs(
-      (lineEnd.y - lineStart.y) * point.x -
-      (lineEnd.x - lineStart.x) * point.y +
-      lineEnd.x * lineStart.y -
-      lineEnd.y * lineStart.x
-    );
-    const bottom = Math.sqrt(
-      Math.pow(lineEnd.y - lineStart.y, 2) +
-      Math.pow(lineEnd.x - lineStart.x, 2)
-    );
-    return bottom === 0 ? 0 : area / bottom;
+    const dx = lineEnd.x - lineStart.x;
+    const dy = lineEnd.y - lineStart.y;
+
+    // 万が一、始点と終点が完全に一致していた場合の安全処理（点と点の距離を返す）
+    const bottom = Math.sqrt(dx * dx + dy * dy);
+    if (bottom === 0) {
+      const splitDx = point.x - lineStart.x;
+      const splitDy = point.y - lineStart.y;
+      return Math.sqrt(splitDx * splitDx + splitDy * splitDy);
+    }
+
+    // 点と直線の距離の公式
+    const area = Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x);
+    return area / bottom;
   }
 
 </script>
