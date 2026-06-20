@@ -30,7 +30,8 @@
     .box img,
     .box canvas {
       aspect-ratio: 9/16;
-      width: 360px;
+      width: 450px;
+      image-rendering: pixelated;
 
       border-color: black;
       border-width: 2px;
@@ -87,11 +88,16 @@
 
   // 描画と二値化を一括で行うヘルパー関数
   function processImage() {
+    // 1. imgからcanvasに転写
     drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
-    // 描画が終わったあとに二値化処理を実行
+    // 2. 二値化処理
     applyBinarization(render_canvas, binarization_canvas, binarization_threshold);
-    // 二値化キャンバスを元に、輪郭を抽出して境界線キャンバスに描画
-    extractBoundary(binarization_canvas, boundary_canvas);
+    // 3. 輪郭を追跡して二次元配列で取得 ＆ Boundary Canvas を色分け描画
+    // 戻り値 lines の型: [ [{x,y}, {x,y}, ...], [{x,y}, ...], ... ]
+    const lines = extractAndTraceBoundary(binarization_canvas, boundary_canvas);
+    console.log(lines)
+    // 4. 取得したすべての線を一括で間引き ＆ Meshpoint Canvas に描画
+    simplifyPoints(meshpoint_canvas, lines, 0);
   }
 
   source.onload = function () {
@@ -145,6 +151,7 @@
     }
 
     // 4. 計算した座標と「変更後のサイズ」を指定して描画
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(img, x, y, scaledW, scaledH);
   }
 
@@ -195,83 +202,208 @@
   }
 
   /**
-   * 二値化画像からビット反転する「輪郭(1px)」を抽出する関数
-   * @param {HTMLCanvasElement} binCanvas - 二値化済みのキャンバス
-   * @param {HTMLCanvasElement} bndCanvas - 輪郭を出力するキャンバス
-   */
-  function extractBoundary(binCanvas, bndCanvas) {
-    let boundary_pixel=0
+     * 1. 輪郭追跡を行い、線ごとに色分け描画した上で、座標の多重配列を返す関数（修正版）
+     * @param {HTMLCanvasElement} binCanvas - 二値化キャンバス
+     * @param {HTMLCanvasElement} bndCanvas - 境界線描画先キャンバス
+     * @returns {Array<Array<{x:number, y:number}>>} 追跡されたすべての線の配列
+     */
+  function extractAndTraceBoundary(binCanvas, bndCanvas) {
     const binCtx = binCanvas.getContext("2d");
     const bndCtx = bndCanvas.getContext("2d");
-
     const width = binCanvas.width;
     const height = binCanvas.height;
 
-    // 二値化データの読み込み用
+    bndCtx.fillStyle = "white";
+    bndCtx.fillRect(0, 0, width, height);
+
     const binImageData = binCtx.getImageData(0, 0, width, height);
     const binData = binImageData.data;
 
-    // 輪郭出力用の新しい空のImageDataを作成（デフォルトは全面透明な黒）
-    const bndImageData = bndCtx.createImageData(width, height);
-    const bndData = bndImageData.data;
-
-    // 指定した (x, y) のピクセルが「白(1)」か「黒(0)」かを返すヘルパー関数
-    // 配列の範囲外（画面の外）はとりあえず白(1)とする
-    function getBit(targetX, targetY) {
-      if (targetX < 0 || targetX >= width || targetY < 0 || targetY >= height) {
-        return { bit: 0, out_range: 1 };
-      }
-
-      // 画面内なら、調べたい先のインデックスを正しく計算 (縦の座標 × 横幅 + 横の座標)
-      const targetIndex = (targetY * width + targetX) * 4;
-
-      const r = binData[targetIndex];
-      const a = binData[targetIndex + 3]; // アルファ値（透明度）を取得
-
-      // 【修正】Rが255、またはアルファ値が0（透明な背景）なら「白(1)」と判定する
-      const isWhite = (r === 255 || a === 0) ? 1 : 0;
-
-      return { bit: isWhite, out_range: 0 };
+    // 黒ピクセル判定
+    function isBlackPixel(x, y) {
+      if (x < 0 || x >= width || y < 0 || y >= height) return false;
+      const idx = (y * width + x) * 4;
+      return binData[idx] < 128 && binData[idx + 3] > 0;
     }
-    // 全ピクセルをスキャン
+
+    // 【ステップ1】エッジ抽出
+    const isEdge = Array.from({ length: height }, () => new Uint8Array(width));
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        // 自分自身のビットを取得
-        const currentBit = getBit(x, y).bit;
-
-        // 上下左右のビットを調べる（引数がすっきり！）
-        const upInfo = getBit(x, y - 1);
-        const up = upInfo.out_range ? currentBit : upInfo.bit
-        const downInfo = getBit(x, y + 1);
-        const down = downInfo.out_range ? currentBit : downInfo.bit
-        const leftInfo = getBit(x - 1, y);
-        const left = leftInfo.out_range ? currentBit : leftInfo.bit
-        const rightInfo = getBit(x + 1, y);
-        const right = rightInfo.out_range ? currentBit : rightInfo.bit
-
-        // 自分が「上下左右のどこか」とビット反転（異なる）しているか判定
-        if (currentBit !== up || currentBit !== down || currentBit !== left || currentBit !== right) {
-          boundary_pixel++
-          // 輪郭部分（黒）
-          const bndIndex = (y * width + x) * 4;
-          bndData[bndIndex] = 0;
-          bndData[bndIndex + 1] = 0;
-          bndData[bndIndex + 2] = 0;
-          bndData[bndIndex + 3] = 255;
-        } else {
-          // それ以外（白）
-          const bndIndex = (y * width + x) * 4;
-          bndData[bndIndex] = 255;
-          bndData[bndIndex + 1] = 255;
-          bndData[bndIndex + 2] = 255;
-          bndData[bndIndex + 3] = 255;
+        if (isBlackPixel(x, y)) {
+          if (!isBlackPixel(x, y - 1) || !isBlackPixel(x, y + 1) ||
+            !isBlackPixel(x - 1, y) || !isBlackPixel(x + 1, y)) {
+            isEdge[y][x] = 1;
+          }
         }
       }
     }
 
-    // 出来上がった輪郭データをBoundary Canvasに反映
-    bndCtx.putImageData(bndImageData, 0, 0);
-    console.log(boundary_pixel)
+    // 【ステップ2】時計回りに外周を厳密にトレースする
+    const visited = Array.from({ length: height }, () => new Uint8Array(width));
+    const allLines = [];
+
+    // 8方向の定義（真右から時計回り）
+    const dx = [1, 1, 0, -1, -1, -1, 0, 1];
+    const dy = [0, 1, 1, 1, 0, -1, -1, -1];
+
+    const colors = ["#CD5C5C", "#F08080", "#FA8072", "#E9967A", "#FFA07A", "#DC143C", "#B22222", "#8B0000", "#FF7F50", "#FF6347", "#FF4500"];
+    let colorIndex = 0;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        // 未訪問のエッジを見つけたら追跡開始
+        if (isEdge[y][x] && !visited[y][x]) {
+
+          const currentPath = [];
+          let cx = x;
+          let cy = y;
+
+          // 侵入方向（最初は左から右へ入ってきたと仮定）
+          let dir = 0;
+
+          // ループ検出用のスタート座標記憶
+          const startX = x;
+          const startY = y;
+
+          while (true) {
+            visited[cy][cx] = 1;
+            currentPath.push({ x: cx, y: cy });
+
+            let foundNext = false;
+
+            // 前に進んだ方向の「左後ろ（dir + 5）」から時計回りに8方向を検査
+            // これにより、分岐があっても常に最も「外側」の輪郭をなぞるようになります
+            for (let i = 0; i < 8; i++) {
+              const nextDir = (dir + 5 + i) % 8;
+              const nx = cx + dx[nextDir];
+              const ny = cy + dy[nextDir];
+
+              if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                // スタート地点に戻ってきた場合は、訪問済みであっても結合するために許可する
+                if (nx === startX && ny === startY && currentPath.length > 2) {
+                  currentPath.push({ x: startX, y: startY });
+                  foundNext = true;
+                  cx = nx;
+                  cy = ny;
+                  break;
+                }
+
+                // 未訪問のエッジピクセルがあればそちらへ進む
+                if (isEdge[ny][nx] && !visited[ny][nx]) {
+                  cx = nx;
+                  cy = ny;
+                  dir = nextDir; // 向かった方向を次の基準にする
+                  foundNext = true;
+                  break;
+                }
+              }
+            }
+
+            // 次のピクセルが見つからない、またはスタートに戻ったらこのパスは終了
+            if (!foundNext || (cx === startX && cy === startY)) {
+              break;
+            }
+          }
+
+          // ノイズ（1〜2マスだけの孤立点）でなければ登録して描画
+          if (currentPath.length > 2) {
+            allLines.push(currentPath);
+
+            const strokeColor = colors[colorIndex % colors.length];
+            colorIndex++;
+
+            bndCtx.beginPath();
+            bndCtx.strokeStyle = strokeColor;
+            bndCtx.lineWidth = 1;
+            bndCtx.moveTo(currentPath[0].x, currentPath[0].y);
+            for (let i = 1; i < currentPath.length; i++) {
+              bndCtx.lineTo(currentPath[i].x, currentPath[i].y);
+            }
+            bndCtx.stroke();
+          }
+        }
+      }
+    }
+
+    return allLines;
+  }
+
+  /**
+   * 2. 受け取ったすべての線をダグラス・ペッカー法で間引き、Meshpoint Canvas に打点する関数
+   * @param {HTMLCanvasElement} mshCanvas - メッシュポイント描画先キャンバス
+   * @param {Array<Array<{x:number, y:number}>>} lines - 線の多重配列
+   * @param {number} epsilon - 間引きのしきい値
+   */
+  function simplifyPoints(mshCanvas, lines, epsilon = 0.5) {
+    const mshCtx = mshCanvas.getContext("2d");
+    const width = mshCanvas.width;
+    const height = mshCanvas.height;
+
+    // キャンバスの初期化（白背景）
+    mshCtx.fillStyle = "white";
+    mshCtx.fillRect(0, 0, width, height);
+
+    mshCtx.fillStyle = "#FF0000";
+
+    // 全ての線（パス）に対してループを回す
+    for (let l = 0; l < lines.length; l++) {
+      const path = lines[l];
+
+      // 各パスをダグラス・ペッカー法で間引き
+      const simplifiedPath = runDouglasPeucker(path, epsilon);
+
+      // 間引かれた頂点を赤い丸で打点
+      for (let i = 0; i < simplifiedPath.length; i++) {
+        mshCtx.beginPath();
+        mshCtx.arc(simplifiedPath[i].x, simplifiedPath[i].y, 1.5, 0, Math.PI * 2);
+        mshCtx.fill();
+      }
+    }
+  }
+
+  /**
+   * 3. ダグラス・ペッカー法（アルゴリズムの再帰ロジック本体）
+   */
+  function runDouglasPeucker(points, epsilon) {
+    if (points.length <= 2) return points;
+
+    let maxDistance = 0;
+    let index = 0;
+    const end = points.length - 1;
+
+    for (let i = 1; i < end; i++) {
+      const distance = getOrthogonalDistance(points[i], points[0], points[end]);
+      if (distance > maxDistance) {
+        index = i;
+        maxDistance = distance;
+      }
+    }
+
+    if (maxDistance > epsilon) {
+      const results1 = runDouglasPeucker(points.slice(0, index + 1), epsilon);
+      const results2 = runDouglasPeucker(points.slice(index), epsilon);
+      return results1.slice(0, results1.length - 1).concat(results2);
+    } else {
+      return [points[0], points[end]];
+    }
+  }
+
+  /**
+   * 4. 点と直線の距離を計算するヘルパー
+   */
+  function getOrthogonalDistance(point, lineStart, lineEnd) {
+    const area = Math.abs(
+      (lineEnd.y - lineStart.y) * point.x -
+      (lineEnd.x - lineStart.x) * point.y +
+      lineEnd.x * lineStart.y -
+      lineEnd.y * lineStart.x
+    );
+    const bottom = Math.sqrt(
+      Math.pow(lineEnd.y - lineStart.y, 2) +
+      Math.pow(lineEnd.x - lineStart.x, 2)
+    );
+    return bottom === 0 ? 0 : area / bottom;
   }
 
 </script>
