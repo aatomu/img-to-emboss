@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+
+<head>
+  <title>Image to Emboss</title>
+
+  <style>
+    body {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      justify-content: space-around;
+
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+    }
+
+    .box {
+      display: flex;
+      flex-direction: column;
+      flex-wrap: nowrap;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .box span {
+      text-decoration: underline;
+    }
+
+    .box img,
+    .box canvas {
+      aspect-ratio: 9/16;
+      width: calc(100vw / 6);
+
+      border-color: black;
+      border-width: 2px;
+      border-style: solid;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="box">
+    <span>Source</span>
+    <img id="source" src="./yuruyuru_atomu.svg"></img>
+  </div>
+  <div class="box">
+    <span>Render Canvas</span>
+    <canvas id="render_canvas"></canvas>
+  </div>
+  <div class="box">
+    <span>Binarization Canvas</span>
+    <canvas id="binarization_canvas"></canvas>
+  </div>
+  <div class="box">
+    <span>Boundary Canvas</span>
+    <canvas id="boundary_canvas"></canvas>
+  </div>
+</body>
+
+<script>
+  const canvas_width = 360
+  const canvas_height = 640
+  const binarization_threshold = 128
+  const source = document.getElementById("source")
+  const render_canvas = document.getElementById("render_canvas")
+  const render_canvas_ctx = render_canvas.getContext("2d")
+
+  source.onload = function () {
+    // 例：横を2倍、縦を1.5倍に拡大して、中央（center, middle）に配置する場合
+    drawImageWithScaleAndAlignment(source, render_canvas, 0.5, 0.5, "center", "middle");
+  };
+
+  if (source.complete) {
+    drawImageWithScaleAndAlignment(source, render_canvas, 0.5, 0.5, "center", "middle");
+  }
+
+  /**
+   * 画像を指定倍率・指定位置でキャンバスに描画する関数
+   * @param {HTMLImageElement} img - 描画する画像要素
+   * @param {HTMLCanvasElement} canvas - 描画先のキャンバス
+   * @param {number} wScale - 横方向の倍率（1.0 = 等倍, 2.0 = 2倍, 0.5 = 半分）
+   * @param {number} hScale - 縦方向の倍率（1.0 = 等倍, 2.0 = 2倍, 0.5 = 半分）
+   * @param {string} hAlign - 左右の配置 ('left', 'center', 'right')
+   * @param {string} vAlign - 上下の配置 ('top', 'middle', 'bottom')
+   */
+  function drawImageWithScaleAndAlignment(img, canvas, wScale = 1.0, hScale = 1.0, hAlign = "center", vAlign = "middle") {
+    const ctx = canvas.getContext("2d");
+
+    // キャンバスをクリア
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 1. 指定された倍率を元に、描画時の「実際のサイズ」を計算
+    const scaledW = img.naturalWidth * wScale;
+    const scaledH = img.naturalHeight * hScale;
+
+    const canvasW = canvas.width;
+    const canvasH = canvas.height;
+
+    // 2. 拡大・縮小後のサイズ（scaledW, scaledH）をベースに位置（X座標）を計算
+    let x = 0;
+    if (hAlign === "left") {
+      x = 0;
+    } else if (hAlign === "center") {
+      x = (canvasW - scaledW) / 2;
+    } else if (hAlign === "right") {
+      x = canvasW - scaledW;
+    }
+
+    // 3. 拡大・縮小後のサイズをベースに位置（Y座標）を計算
+    let y = 0;
+    if (vAlign === "top") {
+      y = 0;
+    } else if (vAlign === "middle") {
+      y = (canvasH - scaledH) / 2;
+    } else if (vAlign === "bottom") {
+      y = canvasH - scaledH;
+    }
+
+    // 4. 計算した座標と「変更後のサイズ」を指定して描画
+    ctx.drawImage(img, x, y, scaledW, scaledH);
+  }
+
+</script>
