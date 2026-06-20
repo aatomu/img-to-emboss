@@ -30,7 +30,7 @@
     .box img,
     .box canvas {
       aspect-ratio: 9/16;
-      width: calc(100vw / 6);
+      width: 360px;
 
       border-color: black;
       border-width: 2px;
@@ -56,23 +56,50 @@
     <span>Boundary Canvas</span>
     <canvas id="boundary_canvas"></canvas>
   </div>
+  <div class="box">
+    <span>Mesh Point Canvas</span>
+    <canvas id="meshpoint_canvas"></canvas>
+  </div>
 </body>
 
 <script>
-  const canvas_width = 360
-  const canvas_height = 640
-  const binarization_threshold = 128
-  const source = document.getElementById("source")
-  const render_canvas = document.getElementById("render_canvas")
-  const render_canvas_ctx = render_canvas.getContext("2d")
+  // const canvas_width = 144;
+  // const canvas_height = 256;
+  const canvas_width = 360;
+  const canvas_height = 640;
+  const binarization_threshold = 128; // この値より明るければ白、暗ければ黒
+
+  const source = document.getElementById("source");
+  const render_canvas = document.getElementById("render_canvas");
+  const binarization_canvas = document.getElementById("binarization_canvas");
+  const boundary_canvas = document.getElementById("boundary_canvas");
+  const meshpoint_canvas = document.getElementById("meshpoint_canvas");
+
+  // 【初期設定】キャンバスのサイズを設定（最初の質問の通り、ここで画質・解像度が決まります）
+  render_canvas.width = canvas_width;
+  render_canvas.height = canvas_height;
+  binarization_canvas.width = canvas_width;
+  binarization_canvas.height = canvas_height;
+  boundary_canvas.width = canvas_width;
+  boundary_canvas.height = canvas_height;
+  meshpoint_canvas.width = canvas_width;
+  meshpoint_canvas.height = canvas_height;
+
+  // 描画と二値化を一括で行うヘルパー関数
+  function processImage() {
+    drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
+    // 描画が終わったあとに二値化処理を実行
+    applyBinarization(render_canvas, binarization_canvas, binarization_threshold);
+    // 二値化キャンバスを元に、輪郭を抽出して境界線キャンバスに描画
+    extractBoundary(binarization_canvas, boundary_canvas);
+  }
 
   source.onload = function () {
-    // 例：横を2倍、縦を1.5倍に拡大して、中央（center, middle）に配置する場合
-    drawImageWithScaleAndAlignment(source, render_canvas, 0.5, 0.5, "center", "middle");
+    processImage();
   };
 
   if (source.complete) {
-    drawImageWithScaleAndAlignment(source, render_canvas, 0.5, 0.5, "center", "middle");
+    processImage();
   }
 
   /**
@@ -119,6 +146,132 @@
 
     // 4. 計算した座標と「変更後のサイズ」を指定して描画
     ctx.drawImage(img, x, y, scaledW, scaledH);
+  }
+
+  /**
+   * 元キャンバスの画像を二値化して、先キャンバスに描画する関数
+   * @param {HTMLCanvasElement} srcCanvas - 元となるキャンバス（Render Canvas）
+   * @param {HTMLCanvasElement} dstCanvas - 出力先のキャンバス（Binarization Canvas）
+   * @param {number} threshold - 閾値 (0 ~ 255)
+   */
+  function applyBinarization(srcCanvas, dstCanvas, threshold) {
+    const srcCtx = srcCanvas.getContext("2d");
+    const dstCtx = dstCanvas.getContext("2d");
+
+    // 1. 元キャンバスからピクセルデータを取得
+    const imageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
+    const data = imageData.data; // [R, G, B, A, R, G, B, A, ...] という配列になっている
+
+    // 2. 全ピクセルをループ処理
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];     // 赤
+      const g = data[i + 1]; // 緑
+      const b = data[i + 2]; // 青
+      const a = data[i + 3]; // 透明度 (0 = 完全透明, 255 = 完全不透明)
+
+      // 元画像が透過（SVGの背景など）の場合の対策：透明部分は白（255）として扱う
+      if (a === 0) {
+        data[i] = 255;     // R
+        data[i + 1] = 255; // G
+        data[i + 2] = 255; // B
+        continue;
+      }
+
+      // 一般的なグレースケール（輝度）変換公式 (NTSC係数による加重平均)
+      const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+
+      // 3. 閾値（threshold）を基準に白か黒かに判定
+      const color = brightness >= threshold ? 255 : 0;
+
+      // 4. データを書き換え
+      data[i] = color;     // R
+      data[i + 1] = color; // G
+      data[i + 2] = color; // B
+      data[i + 3] = 255;   // A (不透明にする)
+    }
+
+    // 5. 処理後のピクセルデータを二値化キャンバスに描き出す
+    dstCtx.putImageData(imageData, 0, 0);
+  }
+
+  /**
+   * 二値化画像からビット反転する「輪郭(1px)」を抽出する関数
+   * @param {HTMLCanvasElement} binCanvas - 二値化済みのキャンバス
+   * @param {HTMLCanvasElement} bndCanvas - 輪郭を出力するキャンバス
+   */
+  function extractBoundary(binCanvas, bndCanvas) {
+    let boundary_pixel=0
+    const binCtx = binCanvas.getContext("2d");
+    const bndCtx = bndCanvas.getContext("2d");
+
+    const width = binCanvas.width;
+    const height = binCanvas.height;
+
+    // 二値化データの読み込み用
+    const binImageData = binCtx.getImageData(0, 0, width, height);
+    const binData = binImageData.data;
+
+    // 輪郭出力用の新しい空のImageDataを作成（デフォルトは全面透明な黒）
+    const bndImageData = bndCtx.createImageData(width, height);
+    const bndData = bndImageData.data;
+
+    // 指定した (x, y) のピクセルが「白(1)」か「黒(0)」かを返すヘルパー関数
+    // 配列の範囲外（画面の外）はとりあえず白(1)とする
+    function getBit(targetX, targetY) {
+      if (targetX < 0 || targetX >= width || targetY < 0 || targetY >= height) {
+        return { bit: 0, out_range: 1 };
+      }
+
+      // 画面内なら、調べたい先のインデックスを正しく計算 (縦の座標 × 横幅 + 横の座標)
+      const targetIndex = (targetY * width + targetX) * 4;
+
+      const r = binData[targetIndex];
+      const a = binData[targetIndex + 3]; // アルファ値（透明度）を取得
+
+      // 【修正】Rが255、またはアルファ値が0（透明な背景）なら「白(1)」と判定する
+      const isWhite = (r === 255 || a === 0) ? 1 : 0;
+
+      return { bit: isWhite, out_range: 0 };
+    }
+    // 全ピクセルをスキャン
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        // 自分自身のビットを取得
+        const currentBit = getBit(x, y).bit;
+
+        // 上下左右のビットを調べる（引数がすっきり！）
+        const upInfo = getBit(x, y - 1);
+        const up = upInfo.out_range ? currentBit : upInfo.bit
+        const downInfo = getBit(x, y + 1);
+        const down = downInfo.out_range ? currentBit : downInfo.bit
+        const leftInfo = getBit(x - 1, y);
+        const left = leftInfo.out_range ? currentBit : leftInfo.bit
+        const rightInfo = getBit(x + 1, y);
+        const right = rightInfo.out_range ? currentBit : rightInfo.bit
+
+        // 自分が「上下左右のどこか」とビット反転（異なる）しているか判定
+        if (currentBit !== up || currentBit !== down || currentBit !== left || currentBit !== right) {
+          boundary_pixel++
+          // 輪郭部分（黒）
+          const bndIndex = (y * width + x) * 4;
+          bndData[bndIndex] = 0;
+          bndData[bndIndex + 1] = 0;
+          bndData[bndIndex + 2] = 0;
+          bndData[bndIndex + 3] = 255;
+        } else {
+          // それ以外（白）
+          const bndIndex = (y * width + x) * 4;
+          bndData[bndIndex] = 255;
+          bndData[bndIndex + 1] = 255;
+          bndData[bndIndex + 2] = 255;
+          bndData[bndIndex + 3] = 255;
+        }
+      }
+    }
+
+    // 出来上がった輪郭データをBoundary Canvasに反映
+    bndCtx.putImageData(bndImageData, 0, 0);
+    console.log(boundary_pixel)
   }
 
 </script>
