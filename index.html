@@ -100,6 +100,22 @@
     // 4. 取得したすべての線を一括で間引き（epsilon = 2.0 に設定）＆ 戻り値を取得
     const simplifiedLines = simplifyLines(meshpoint_canvas, lines, 0.5);
     console.log("間引き後の頂点データ:", simplifiedLines);
+
+    // 5. 内包関係処理をした頂点データ
+    const relationTree = analyzeInclusionRelationship(simplifiedLines);
+    console.log("内包関係の結果:", relationTree);
+
+    // 6. メッシュ処理
+    const meshData = generateMeshWithoutLibrary(relationTree)
+    console.log("メッシュデータ:", meshData);
+
+    const objText = exportToOBJ(meshData, 10.0);
+    // ブラウザで即座に「character_emboss.obj」としてダウンロードさせる
+    const blob = new Blob([objText], { type: "text/plain" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "character_emboss.obj";
+    link.click();
   }
 
   source.onload = function () {
@@ -437,6 +453,389 @@
     // 点と直線の距離の公式
     const area = Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x);
     return area / bottom;
+  }
+
+  function analyzeInclusionRelationship(allSimplifiedLines) {
+    // 1. 各ポリゴンの面積と巻き方向（CW:時計回り / CCW:反時計回り）を計算
+    // 抽出直後の二値化画像からは、外周(Outer)と内周(Inner)で必ず巻き方向が逆になります。
+    const polygons = allSimplifiedLines.map((line, index) => {
+      let area = 0;
+      for (let i = 0; i < line.length; i++) {
+        const j = (i + 1) % line.length;
+        area += line[i].x * line[j].y - line[j].x * line[i].y;
+      }
+      area /= 2;
+
+      // AABB (Bounding Box) を計算して、当たり判定の高速化と正確性を担保
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      line.forEach(p => {
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+      });
+
+      return {
+        index: index,
+        line: line,
+        area: Math.abs(area),
+        isCCW: area < 0, // 巻き方向
+        bounds: { minX, maxX, minY, maxY }
+      };
+    });
+
+    // 2. 面積が大きい順にソート（大きいポリゴンほど「親」になりやすいため）
+    polygons.sort((a, b) => b.area - a.area);
+
+    // 3. 階層構造（親子関係）の決定
+    const lineInfos = polygons.map(target => {
+      let directParent = null;
+      let minParentArea = Infinity;
+
+      // 自分より面積が大きいポリゴン（親の候補）だけをチェック
+      polygons.forEach(potentialParent => {
+        if (target.index === potentialParent.index) return;
+        if (potentialParent.area <= target.area) return;
+
+        // 簡易判定：そもそもBounding Boxに完全に入っているか
+        const tb = target.bounds;
+        const pb = potentialParent.bounds;
+        if (tb.minX >= pb.minX && tb.maxX <= pb.maxX && tb.minY >= pb.minY && tb.maxY <= pb.maxY) {
+
+          // 厳密なレイキャスティング判定（複数点でチェックして頑健性を高める）
+          let insideCount = 0;
+          const testPoints = [
+            target.line[0],
+            target.line[Math.floor(target.line.length / 2)],
+            { x: (tb.minX + tb.maxX) / 2, y: (tb.minY + tb.maxY) / 2 } // 中心点
+          ];
+
+          testPoints.forEach(pt => {
+            if (robustIsPointInPolygon(pt, potentialParent.line)) {
+              insideCount++;
+            }
+          });
+
+          // 過半数が内側に入っているなら内包されているとみなす
+          if (insideCount >= 2) {
+            // 最も内側（＝面積が最も小さい親）を直接の親とする
+            if (potentialParent.area < minParentArea) {
+              minParentArea = potentialParent.area;
+              directParent = potentialParent.index;
+            }
+          }
+        }
+      });
+
+      return {
+        index: target.index,
+        line: target.line,
+        directParent: directParent
+      };
+    });
+
+    // 4. 親カウント（深さ）を計算してツリーを組み立て
+    lineInfos.forEach(info => {
+      let count = 0;
+      let p = info.directParent;
+      while (p !== null) {
+        count++;
+        const parentInfo = lineInfos.find(item => item.index === p);
+        p = parentInfo ? parentInfo.directParent : null;
+      }
+      info.parentCount = count;
+    });
+
+    function buildTree(parentIndex, depth) {
+      const children = lineInfos.filter(info =>
+        parentIndex === null ? info.parentCount === 0 : info.directParent === parentIndex
+      );
+
+      return children.map(child => {
+        const type = (depth % 2 === 0) ? "outer" : "inner";
+        return {
+          type: type,
+          lines: child.line.map(p => [p.x, p.y]),
+          contents: buildTree(child.index, depth + 1)
+        };
+      });
+    }
+
+    return buildTree(null, 0);
+  }
+
+  /**
+   * レイキャスティング法のバグ（エッジ上の不確定性）を排除した堅牢な内外判定
+   */
+  function robustIsPointInPolygon(point, polygon) {
+    let inside = false;
+    const x = point.x, y = point.y;
+
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].x, yi = polygon[i].y;
+      const xj = polygon[j].x, yj = polygon[j].y;
+
+      // 完全にエッジ上、あるいは頂点上に乗っている場合の微小なブレを許容
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  /**
+   * 独自実装のポリゴン三角形分割（穴対応型・耳切り法ベース）
+   * @param {Array<Object>} treeData - analyzeInclusionRelationship の返り値
+   * @returns {Array<{vertices: number[], indices: number[]}>} メッシュデータの配列
+   */
+  function generateMeshWithoutLibrary(treeData) {
+    const meshes = [];
+
+    treeData.forEach(rootNode => {
+      if (rootNode.type !== "outer") return;
+
+      // --- 1. 穴（Inner）を外周（Outer）に結合して一本の閉じたパスにする ---
+      // 外周のコピー（オブジェクト構造から {x, y, id} の形へマッピング）
+      let combinedPolygon = rootNode.lines.map((p, i) => ({ x: p[0], y: p[1], id: i }));
+      let globalVertices = rootNode.lines.map(p => ({ x: p[0], y: p[1] }));
+
+      // 穴を一つずつ外周に結合
+      rootNode.contents.forEach(childNode => {
+        if (childNode.type !== "inner") return;
+
+        const hole = childNode.lines.map(p => ({ x: p[0], y: p[1] }));
+        // 穴の頂点もグローバルな頂点リストに登録
+        const holeStartIdx = globalVertices.length;
+        hole.forEach(p => globalVertices.push({ x: p.x, y: p.y }));
+        const holePolygon = hole.map((p, i) => ({ x: p.x, y: p.y, id: holeStartIdx + i }));
+
+        combinedPolygon = bridgeHoleToOuter(combinedPolygon, holePolygon);
+      });
+
+      // --- 2. 一筆書きになったポリゴンを耳切り法で三角形に分割 ---
+      const indices = [];
+      let polygon = [...combinedPolygon];
+
+      // 時計回り(CW)か反時計回り(CCW)かを判定し、耳切り法のために頂点順序を標準化
+      if (getPolygonArea(polygon) < 0) {
+        polygon.reverse();
+      }
+
+      // 頂点が3つになるまで切り落としループ
+      let timeout = polygon.length * 2; // 無限ループ防止策
+      while (polygon.length > 2 && timeout > 0) {
+        timeout--;
+        let earFound = false;
+
+        for (let i = 0; i < polygon.length; i++) {
+          const prev = polygon[(i - 1 + polygon.length) % polygon.length];
+          const curr = polygon[i];
+          const next = polygon[(i + 1) % polygon.length];
+
+          // 1. 凸判定（内角が180度未満か）
+          if (crossProduct(prev, curr, next) <= 0) continue;
+
+          // 2. 判定対象の三角形(prev, curr, next)の内部に、他の頂点が含まれていないか
+          let hasPointInside = false;
+          for (let j = 0; j < polygon.length; j++) {
+            const p = polygon[j];
+            if (p.id === prev.id || p.id === curr.id || p.id === next.id) continue;
+
+            if (isPointInTriangle(p, prev, curr, next)) {
+              hasPointInside = true;
+              break;
+            }
+          }
+
+          // 耳が見つかったら切り落とす
+          if (!hasPointInside) {
+            indices.push(prev.id, curr.id, next.id);
+            polygon.splice(i, 1); // 現在の頂点を除去
+            earFound = true;
+            break;
+          }
+        }
+
+        if (!earFound) {
+          // 幾何学的な誤差や自己交差で耳が見つからない場合の安全弁
+          // 最悪の場合、無理やり最初の3点で三角形を作る
+          indices.push(polygon[0].id, polygon[1].id, polygon[2].id);
+          polygon.splice(1, 1);
+        }
+      }
+
+      // 出力用にフラットな座標配列 [x0,y0, x1,y1, ...] に変換
+      const verticesFlat = [];
+      globalVertices.forEach(v => verticesFlat.push(v.x, v.y));
+
+      meshes.push({
+        vertices: verticesFlat,
+        indices: indices
+      });
+    });
+
+    return meshes;
+  }
+
+  /**
+   * 外周ポリゴンと穴ポリゴンを最短距離の直線（ブリッジ）で結合する
+   */
+  function bridgeHoleToOuter(outer, hole) {
+    let maxOuterIdx = 0;
+    let maxHoleIdx = 0;
+    let minDistance = Infinity;
+
+    // 穴の頂点と外周の頂点の間で、もっとも距離が近いペアを探す
+    // （X座標が最大となる穴の頂点から右にレイを飛ばす方法が一般的ですが、総当たりが最も頑健です）
+    for (let i = 0; i < outer.length; i++) {
+      for (let j = 0; j < hole.length; j++) {
+        const dx = outer[i].x - hole[j].x;
+        const dy = outer[i].y - hole[j].y;
+        const dist = dx * dx + dy * dy;
+        if (dist < minDistance) {
+          minDistance = dist;
+          maxOuterIdx = i;
+          maxHoleIdx = j;
+        }
+      }
+    }
+
+    const bridged = [];
+    // 1. 外周のスタートから結合点までコピー
+    for (let i = 0; i <= maxOuterIdx; i++) bridged.push(outer[i]);
+
+    // 2. 穴を結合点から1周コピーして戻ってくる
+    for (let j = 0; j <= hole.length; j++) {
+      bridged.push(hole[(maxHoleIdx + j) % hole.length]);
+    }
+
+    // 3. 外周の結合点から最後までをコピー
+    for (let i = maxOuterIdx; i < outer.length; i++) bridged.push(outer[i]);
+
+    return bridged;
+  }
+
+  /**
+   * ベクトルの外積（凸判定・巻き方向判定用）
+   */
+  function crossProduct(p1, p2, p3) {
+    return (p2.x - p1.x) * (p3.y - p2.y) - (p2.y - p1.y) * (p3.x - p2.x);
+  }
+
+  /**
+   * ポリゴンの符号付き面積を計算（方向判定用）
+   */
+  function getPolygonArea(polygon) {
+    let area = 0;
+    for (let i = 0; i < polygon.length; i++) {
+      const j = (i + 1) % polygon.length;
+      area += polygon[i].x * polygon[j].y;
+      area -= polygon[j].x * polygon[i].y;
+    }
+    return area / 2;
+  }
+
+  /**
+   * 点pが三角形(a, b, c)の内部にあるかどうかの判定
+   */
+  function isPointInTriangle(p, a, b, c) {
+    const cp1 = crossProduct(a, b, p);
+    const cp2 = crossProduct(b, c, p);
+    const cp3 = crossProduct(c, a, p);
+
+    // すべての外積の符号が一致していれば内部にある
+    return ((cp1 >= 0 && cp2 >= 0 && cp3 >= 0) || (cp1 <= 0 && cp2 <= 0 && cp3 <= 0));
+  }
+
+  /**
+   * 独自実装の2D三角メッシュ構造から3D立体(押し出し面)を形成し、OBJ形式の文字列に変換する関数
+   * @param {Array} meshes - generateMeshWithoutLibrary の返り値（vertices, indices を持つオブジェクトの配列）
+   * @param {number} thickness - 押し出す立体(Z方向)の厚み
+   * @returns {string} Wavefront OBJフォーマットのテキスト
+   */
+  function exportToOBJ(meshes, thickness = 10.0) {
+    let objLines = [];
+    objLines.push("# Wavefront OBJ file exported from Image to Emboss Processor");
+    objLines.push("# Generated on demand via custom Ear Clipping triangulation");
+
+    let vertexOffset = 1; // OBJのインデックスは1から始まります
+
+    meshes.forEach((mesh, mIdx) => {
+      objLines.push(`\no mesh_part_${mIdx}`);
+      const vertices = mesh.vertices;
+      const indices = mesh.indices;
+      const vertexCount = vertices.length / 2;
+
+      // 1. 頂点データ出力 (前面 Z = thickness, 背面 Z = 0)
+      // 前面 (Front side)
+      for (let i = 0; i < vertices.length; i += 2) {
+        objLines.push(`v ${vertices[i].toFixed(4)} ${vertices[i + 1].toFixed(4)} ${thickness.toFixed(4)}`);
+      }
+      // 背面 (Back side)
+      for (let i = 0; i < vertices.length; i += 2) {
+        objLines.push(`v ${vertices[i].toFixed(4)} ${vertices[i + 1].toFixed(4)} 0.0000`);
+      }
+
+      // 2. 面データ出力 (前面・背面・側面のポリゴンをインデックス構築)
+      objLines.push("# Front faces");
+      for (let i = 0; i < indices.length; i += 3) {
+        // 前面は反時計回り(CCW)
+        const v0 = vertexOffset + indices[i];
+        const v1 = vertexOffset + indices[i + 1];
+        const v2 = vertexOffset + indices[i + 2];
+        objLines.push(`f ${v0} ${v1} ${v2}`);
+      }
+
+      objLines.push("# Back faces");
+      for (let i = 0; i < indices.length; i += 3) {
+        // 背面は前面の裏側になるので、法線を外に向けるために頂点の順序を反転
+        const v0 = vertexOffset + vertexCount + indices[i];
+        const v1 = vertexOffset + vertexCount + indices[i + 2];
+        const v2 = vertexOffset + vertexCount + indices[i + 1];
+        objLines.push(`f ${v0} ${v1} ${v2}`);
+      }
+
+      // 3. 側面 (Side walls) の自動生成
+      objLines.push("# Side wall faces");
+
+      // エッジマップを作って出現回数をカウント
+      const edgeMap = {};
+      for (let i = 0; i < indices.length; i += 3) {
+        const tri = [indices[i], indices[i + 1], indices[i + 2]];
+        for (let j = 0; j < 3; j++) {
+          const u = tri[j];
+          const v = tri[(j + 1) % 3];
+          const key = u < v ? `${u}_${v}` : `${v}_${u}`;
+          if (!edgeMap[key]) {
+            edgeMap[key] = { count: 1, from: u, to: v };
+          } else {
+            edgeMap[key].count++;
+          }
+        }
+      }
+
+      // countが1のエッジ（＝他の三角形と共有されていない＝一番外側の外周、または内周の穴のフチ）を側面として壁を立てる
+      for (const key in edgeMap) {
+        if (edgeMap[key].count === 1) {
+          const u = edgeMap[key].from;
+          const v = edgeMap[key].to;
+
+          // 前面の2点
+          const f_u = vertexOffset + u;
+          const f_v = vertexOffset + v;
+          // 背面の2点
+          const b_u = vertexOffset + vertexCount + u;
+          const b_v = vertexOffset + vertexCount + v;
+
+          // 2つの三角形(テクスチャのポリゴン単位)を組み合わせて側面の四角形の壁を作る
+          objLines.push(`f ${f_u} ${b_u} ${b_v}`);
+          objLines.push(`f ${f_u} ${b_v} ${f_v}`);
+        }
+      }
+
+      // 次の独立メッシュ（パーツ）へ向けてインデックスをずらす
+      vertexOffset += vertexCount * 2;
+    });
+
+    return objLines.join("\n");
   }
 
 </script>
