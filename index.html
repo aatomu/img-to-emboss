@@ -1,8 +1,7 @@
 <!DOCTYPE html>
 
 <head>
-  <title>Image to Emboss</title>
-
+  <title>Image to Emboss (Smooth Marching Squares)</title>
   <style>
     body {
       display: flex;
@@ -25,17 +24,20 @@
 
     .box span {
       text-decoration: underline;
+      margin-bottom: 5px;
     }
 
     .box img,
-    .box canvas {
+    .box canvas,
+    .box svg {
       aspect-ratio: 9/16;
       width: 450px;
       image-rendering: pixelated;
-
       border-color: black;
       border-width: 2px;
       border-style: solid;
+      background-color: white;
+      /* SVG用に背景を白に */
     }
   </style>
 </head>
@@ -50,71 +52,51 @@
     <canvas id="render_canvas"></canvas>
   </div>
   <div class="box">
-    <span>Binarization Canvas</span>
-    <canvas id="binarization_canvas"></canvas>
-  </div>
-  <div class="box">
-    <span>Boundary Canvas</span>
+    <span>Mesh Solid</span>
     <canvas id="boundary_canvas"></canvas>
   </div>
   <div class="box">
-    <span>Mesh Point Canvas</span>
-    <canvas id="meshpoint_canvas"></canvas>
+    <span>Mesh Wireframe</span>
+    <svg id="mesh_preview_svg"></svg>
   </div>
 </body>
 
 <script>
-  // const canvas_width = 144;
-  // const canvas_height = 256;
   const canvas_width = 360;
   const canvas_height = 640;
-  const binarization_threshold = 128; // この値より明るければ白、暗ければ黒
-  const colors = ["#FFA07A", "#E9967A", "#FA8072", "#F08080", "#CD5C5C", "#FF7F50", "#FF6347", "#FF4500", "#DC143C", "#B22222", "#8B0000"];
+  const binarization_threshold = 128;
 
   const source = document.getElementById("source");
   const render_canvas = document.getElementById("render_canvas");
-  const binarization_canvas = document.getElementById("binarization_canvas");
   const boundary_canvas = document.getElementById("boundary_canvas");
-  const meshpoint_canvas = document.getElementById("meshpoint_canvas");
+  const mesh_preview_svg = document.getElementById("mesh_preview_svg");
 
-  // 【初期設定】キャンバスのサイズを設定（最初の質問の通り、ここで画質・解像度が決まります）
   render_canvas.width = canvas_width;
   render_canvas.height = canvas_height;
-  binarization_canvas.width = canvas_width;
-  binarization_canvas.height = canvas_height;
   boundary_canvas.width = canvas_width;
   boundary_canvas.height = canvas_height;
-  meshpoint_canvas.width = canvas_width;
-  meshpoint_canvas.height = canvas_height;
+  mesh_preview_svg.setAttribute("viewBox", `0 0 ${canvas_width} ${canvas_height}`);
 
-  // 描画と二値化を一括で行うヘルパー関数
   function processImage() {
     // 1. imgからcanvasに転写
     drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
-    // 2. 二値化処理
-    applyBinarization(render_canvas, binarization_canvas, binarization_threshold);
-    // 3. 輪郭抽出
-    const lines = extractAndTraceBoundary(binarization_canvas, boundary_canvas);
-    console.log("元の輪郭データ:", lines);
+    // 2. Render Canvas から直接 Marching Squares を実行（線形補間で滑らかに！）
+    const stepSize = 2; // 中間色を使うため、stepが2や3でもかなり綺麗に出ます
+    const meshData = generateSmoothMeshViaMarchingSquares(render_canvas, binarization_threshold, stepSize);
+    console.log("Smooth Marching Squares メッシュデータ:", meshData);
 
-    // 4. 取得したすべての線を一括で間引き（epsilon = 2.0 に設定）＆ 戻り値を取得
-    const simplifiedLines = simplifyLines(meshpoint_canvas, lines, 0.5);
-    console.log("間引き後の頂点データ:", simplifiedLines);
+    // 3. プレビューの描画
+    drawMeshSolid(boundary_canvas, meshData);
+    drawMeshSVG(mesh_preview_svg, meshData); // 極細のSVG線でプレビュー
 
-    // 5. 内包関係処理をした頂点データ
-    const relationTree = analyzeInclusionRelationship(simplifiedLines);
-    console.log("内包関係の結果:", relationTree);
+    // 4. 3Dデータ(OBJ)として書き出し
+    const objText = exportToOBJ([meshData], 10.0);
 
-    // 6. メッシュ処理
-    const meshData = generateMeshWithoutLibrary(relationTree)
-    console.log("メッシュデータ:", meshData);
-
-    const objText = exportToOBJ(meshData, 10.0);
-    // ブラウザで即座に「character_emboss.obj」としてダウンロードさせる
+    // ダウンロード処理
     const blob = new Blob([objText], { type: "text/plain" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = "character_emboss.obj";
+    link.download = "character_emboss_smooth.obj";
     link.click();
   }
 
@@ -174,587 +156,152 @@
   }
 
   /**
-   * 元キャンバスの画像を二値化して、先キャンバスに描画する関数
-   * @param {HTMLCanvasElement} srcCanvas - 元となるキャンバス（Render Canvas）
-   * @param {HTMLCanvasElement} dstCanvas - 出力先のキャンバス（Binarization Canvas）
-   * @param {number} threshold - 閾値 (0 ~ 255)
+   * 中間色を使用した線形補間付き Marching Squares
    */
-  function applyBinarization(srcCanvas, dstCanvas, threshold) {
-    const srcCtx = srcCanvas.getContext("2d");
-    const dstCtx = dstCanvas.getContext("2d");
+  function generateSmoothMeshViaMarchingSquares(srcCanvas, threshold, step = 1) {
+    const ctx = srcCanvas.getContext("2d");
+    const width = srcCanvas.width;
+    const height = srcCanvas.height;
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const data = imgData.data;
 
-    // 1. 元キャンバスからピクセルデータを取得
-    const imageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
-    const data = imageData.data; // [R, G, B, A, R, G, B, A, ...] という配列になっている
-
-    // 2. 全ピクセルをループ処理
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];     // 赤
-      const g = data[i + 1]; // 緑
-      const b = data[i + 2]; // 青
-      const a = data[i + 3]; // 透明度 (0 = 完全透明, 255 = 完全不透明)
-
-      // 元画像が透過（SVGの背景など）の場合の対策：透明部分は白（255）として扱う
-      if (a === 0) {
-        data[i] = 255;     // R
-        data[i + 1] = 255; // G
-        data[i + 2] = 255; // B
-        continue;
-      }
-
-      // 一般的なグレースケール（輝度）変換公式 (NTSC係数による加重平均)
-      const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
-
-      // 3. 閾値（threshold）を基準に白か黒かに判定
-      const color = brightness >= threshold ? 255 : 0;
-
-      // 4. データを書き換え
-      data[i] = color;     // R
-      data[i + 1] = color; // G
-      data[i + 2] = color; // B
-      data[i + 3] = 255;   // A (不透明にする)
-    }
-
-    // 5. 処理後のピクセルデータを二値化キャンバスに描き出す
-    dstCtx.putImageData(imageData, 0, 0);
-  }
-
-  /**
-     * 1. 輪郭追跡を行い、1pixelずつ確実に色分け描画した上で、座標の多重配列を返す関数
-     * @param {HTMLCanvasElement} binCanvas - 二値化キャンバス
-     * @param {HTMLCanvasElement} bndCanvas - 境界線描画先キャンバス
-     * @returns {Array<Array<{x:number, y:number}>>} 追跡されたすべての線の配列
-     */
-  function extractAndTraceBoundary(binCanvas, bndCanvas) {
-    const binCtx = binCanvas.getContext("2d");
-    const bndCtx = bndCanvas.getContext("2d");
-    const width = binCanvas.width;
-    const height = binCanvas.height;
-
-    // 背景を白で初期化
-    bndCtx.fillStyle = "white";
-    bndCtx.fillRect(0, 0, width, height);
-
-    const binImageData = binCtx.getImageData(0, 0, width, height);
-    const binData = binImageData.data;
-
-    // 黒ピクセル判定
-    function isBlackPixel(x, y) {
-      if (x < 0 || x >= width || y < 0 || y >= height) return false;
+    // 指定座標のピクセルの「明るさ（0〜255）」を取得する関数
+    function getVal(x, y) {
+      if (x < 0 || x >= width || y < 0 || y >= height) return 255; // 枠外は白（余白）
       const idx = (y * width + x) * 4;
-      return binData[idx] < 128 && binData[idx + 3] > 0;
+      // 透過ピクセルは白扱いにする
+      if (data[idx + 3] === 0) return 255;
+      return 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
     }
 
-    // 【ステップ1】1px幅の綺麗なエッジマップを作成
-    const isEdge = Array.from({ length: height }, () => new Uint8Array(width));
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (isBlackPixel(x, y)) {
-          // 上下左右のいずれかが白（または画面外）なら輪郭ピクセル
-          if (!isBlackPixel(x, y - 1) || !isBlackPixel(x, y + 1) ||
-            !isBlackPixel(x - 1, y) || !isBlackPixel(x + 1, y)) {
-            isEdge[y][x] = 1;
-          }
+    // 2点間の値から、閾値（128）を通る正確なサブピクセル位置の比率を計算（線形補間）
+    function lerpOffset(v1, v2) {
+      if (v1 === v2) return 0.5;
+      return (threshold - v1) / (v2 - v1);
+    }
+
+    const vertexMap = new Map();
+    const vertices = [];
+    const indices = [];
+
+    function addVertex(x, y) {
+      // 座標を小数点第2位で丸めて、近すぎる頂点を共有させる
+      const kx = Math.round(x * 100) / 100;
+      const ky = Math.round(y * 100) / 100;
+      const key = `${kx},${ky}`;
+      if (vertexMap.has(key)) return vertexMap.get(key);
+
+      const idx = vertices.length / 2;
+      vertices.push(kx, ky); // 丸めた座標を使用
+      vertexMap.set(key, idx);
+      return idx;
+    }
+
+    function addTriangle(p1, p2, p3) {
+      indices.push(addVertex(p1.x, p1.y), addVertex(p2.x, p2.y), addVertex(p3.x, p3.y));
+    }
+
+    for (let y = 0; y < height - step; y += step) {
+      for (let x = 0; x < width - step; x += step) {
+        // 4隅の明るさを取得
+        const vTL = getVal(x, y);
+        const vTR = getVal(x + step, y);
+        const vBL = getVal(x, y + step);
+        const vBR = getVal(x + step, y + step);
+
+        // 閾値より暗い（黒に近い）場合を「実体（Solid）」として1にする
+        const tl = vTL < threshold ? 1 : 0;
+        const tr = vTR < threshold ? 1 : 0;
+        const bl = vBL < threshold ? 1 : 0;
+        const br = vBR < threshold ? 1 : 0;
+
+        const state = (tl << 3) | (tr << 2) | (br << 1) | bl;
+        if (state === 0) continue;
+
+        // 線形補間により、エッジの中間点を正確に計算
+        const P_TL = { x: x, y: y };
+        const P_TR = { x: x + step, y: y };
+        const P_BR = { x: x + step, y: y + step };
+        const P_BL = { x: x, y: y + step };
+
+        const P_T = { x: x + step * lerpOffset(vTL, vTR), y: y };
+        const P_R = { x: x + step, y: y + step * lerpOffset(vTR, vBR) };
+        const P_B = { x: x + step * lerpOffset(vBL, vBR), y: y + step };
+        const P_L = { x: x, y: y + step * lerpOffset(vTL, vBL) };
+
+        // パターンに応じた三角形分割
+        switch (state) {
+          case 1: addTriangle(P_L, P_B, P_BL); break;
+          case 2: addTriangle(P_B, P_R, P_BR); break;
+          case 3: addTriangle(P_L, P_R, P_BR); addTriangle(P_L, P_BR, P_BL); break;
+          case 4: addTriangle(P_R, P_T, P_TR); break;
+          case 5: addTriangle(P_L, P_B, P_BL); addTriangle(P_R, P_T, P_TR); break;
+          case 6: addTriangle(P_B, P_T, P_TR); addTriangle(P_B, P_TR, P_BR); break;
+          case 7: addTriangle(P_L, P_T, P_TR); addTriangle(P_L, P_TR, P_BR); addTriangle(P_L, P_BR, P_BL); break;
+          case 8: addTriangle(P_T, P_L, P_TL); break;
+          case 9: addTriangle(P_T, P_B, P_BL); addTriangle(P_T, P_BL, P_TL); break;
+          case 10: addTriangle(P_T, P_L, P_TL); addTriangle(P_B, P_R, P_BR); break;
+          case 11: addTriangle(P_T, P_R, P_BR); addTriangle(P_T, P_BR, P_BL); addTriangle(P_T, P_BL, P_TL); break;
+          case 12: addTriangle(P_R, P_L, P_TL); addTriangle(P_R, P_TL, P_TR); break;
+          case 13: addTriangle(P_R, P_B, P_BL); addTriangle(P_R, P_BL, P_TL); addTriangle(P_R, P_TL, P_TR); break;
+          case 14: addTriangle(P_B, P_L, P_TL); addTriangle(P_B, P_TL, P_TR); addTriangle(P_B, P_TR, P_BR); break;
+          case 15: addTriangle(P_BL, P_TL, P_TR); addTriangle(P_BL, P_TR, P_BR); break;
         }
       }
     }
-
-    // 【ステップ2】外周トレース処理
-    const visited = Array.from({ length: height }, () => new Uint8Array(width));
-    const allLines = [];
-
-    // 8方向の定義（0:右, 1:右下, 2:下, 3:左下, 4:左, 5:左上, 6:上, 7:右上）
-    const dx = [1, 1, 0, -1, -1, -1, 0, 1];
-    const dy = [0, 1, 1, 1, 0, -1, -1, -1];
-
-    let colorIndex = 0;
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        // 未訪問のエッジを見つけたら、そこから一本の線を追跡開始
-        if (isEdge[y][x] && !visited[y][x]) {
-
-          const currentPath = [];
-          let cx = x;
-          let cy = y;
-
-          // 初期侵入方向（左から右へスキャンして見つけたため、最初は右方向を基準にする）
-          let dir = 0;
-
-          const startX = x;
-          const startY = y;
-
-          while (true) {
-            visited[cy][cx] = 1;
-            currentPath.push({ x: cx, y: cy });
-
-            let foundNext = false;
-
-            // 左後ろ（dir + 5）から時計回りに周囲8マスを走査
-            for (let i = 0; i < 8; i++) {
-              const nextDir = (dir + 5 + i) % 8;
-              const nx = cx + dx[nextDir];
-              const ny = cy + dy[nextDir];
-
-              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                // スタート地点に戻ってきた場合（ループの結合判定）
-                if (nx === startX && ny === startY && currentPath.length > 2) {
-                  currentPath.push({ x: startX, y: startY });
-                  foundNext = true;
-                  cx = nx;
-                  cy = ny;
-                  break;
-                }
-
-                // 未訪問の輪郭ピクセルを発見
-                if (isEdge[ny][nx] && !visited[ny][nx]) {
-                  cx = nx;
-                  cy = ny;
-                  dir = nextDir;
-                  foundNext = true;
-                  break;
-                }
-              }
-            }
-
-            // 次のピクセルがない、またはスタート地点に完全に融合したら追跡終了
-            if (!foundNext || (cx === startX && cy === startY)) {
-              break;
-            }
-          }
-
-          // 【ステップ3】1pixelずつ確実にキャンバスへ塗る処理
-          // 2ピクセル以下の極小ノイズでなければ描画・登録
-          if (currentPath.length > 2) {
-            allLines.push(currentPath);
-
-            // この線専用の色を決定
-            const strokeColor = colors[colorIndex % colors.length];
-            colorIndex++;
-
-            // ctx.lineTo は斜め移動時に見た目がかすれることがあるため、
-            // 座標配列から1ピクセルずつ 1x1 の正方形として確実に塗りつぶします
-            bndCtx.fillStyle = strokeColor;
-            for (let i = 0; i < currentPath.length; i++) {
-              bndCtx.fillRect(currentPath[i].x, currentPath[i].y, 1, 1);
-            }
-          }
-        }
-      }
-    }
-
-    return allLines;
+    return { vertices, indices };
   }
 
-  /**
-   * 2. 受け取ったすべての線をダグラス・ペッカー法で間引き、Meshpoint Canvas にドットを描画して、間引いた線の配列を返す関数
-   * @param {HTMLCanvasElement} mshCanvas - メッシュポイント描画先キャンバス
-   * @param {Array<Array<{x:number, y:number}>>} lines - 線の多重配列
-   * @param {number} epsilon - 間引きのしきい値
-   * @returns {Array<Array<{x:number, y:number}>>} 間引かれたすべての線の多重配列
-   */
-  function simplifyLines(mshCanvas, lines, epsilon = 2.0) {
-    const mshCtx = mshCanvas.getContext("2d");
-    const width = mshCanvas.width;
-    const height = mshCanvas.height;
+  function drawMeshSolid(canvas, mesh) {
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#FF7F50";
 
-    // キャンバスの初期化（白背景）
-    mshCtx.fillStyle = "white";
-    mshCtx.fillRect(0, 0, width, height);
-
-    // 指定されたカラーパレット
-    const colors = ["#FFA07A", "#E9967A", "#FA8072", "#F08080", "#CD5C5C", "#FF7F50", "#FF6347", "#FF4500", "#DC143C", "#B22222", "#8B0000"];
-
-    // 間引いた後のすべての線を格納する配列
-    const allSimplifiedLines = [];
-
-    // 全ての線（パス）に対してループを回す
-    for (let l = 0; l < lines.length; l++) {
-      const path = lines[l];
-      if (path.length < 3) continue; // 点が少なすぎるパスはスキップ
-
-      let simplifiedPath;
-      const start = path[0];
-      const end = path[path.length - 1];
-
-      // 閉じた輪郭（ループ）の分割処理
-      if (start.x === end.x && start.y === end.y) {
-        const mid = Math.floor(path.length / 2);
-        const part1 = runDouglasPeucker(path.slice(0, mid + 1), epsilon);
-        const part2 = runDouglasPeucker(path.slice(mid), epsilon);
-        simplifiedPath = part1.slice(0, part1.length - 1).concat(part2);
-      } else {
-        simplifiedPath = runDouglasPeucker(path, epsilon);
-      }
-
-      // 結果の配列に追加
-      allSimplifiedLines.push(simplifiedPath);
-
-      // このライン（line）専用の色を配列から決定
-      const strokeColor = colors[l % colors.length];
-      mshCtx.fillStyle = strokeColor;
-
-      // 間引かれた頂点を 1x1 のドットとして確実に塗りつぶす
-      for (let i = 0; i < simplifiedPath.length; i++) {
-        mshCtx.fillRect(simplifiedPath[i].x, simplifiedPath[i].y, 1, 1);
-      }
-    }
-
-    // 間引いた後の多重配列を返す
-    return allSimplifiedLines;
-  }
-
-  /**
-   * 3. ダグラス・ペッカー法（アルゴリズム本体の再帰ロジック）
-   */
-  function runDouglasPeucker(points, epsilon) {
-    if (points.length <= 2) return points;
-
-    let maxDistance = 0;
-    let index = 0;
-    const end = points.length - 1;
-
-    // 始点と終点を結ぶ直線から、最も遠い位置にある点（最大誤差の点）を探す
-    for (let i = 1; i < end; i++) {
-      const distance = getOrthogonalDistance(points[i], points[0], points[end]);
-      if (distance > maxDistance) {
-        index = i;
-        maxDistance = distance;
-      }
-    }
-
-    // 最大誤差がしきい値(epsilon)を超えている場合のみ、その点でパスを分割して再帰処理
-    if (maxDistance > epsilon) {
-      const results1 = runDouglasPeucker(points.slice(0, index + 1), epsilon);
-      const results2 = runDouglasPeucker(points.slice(index), epsilon);
-      // 境界の重複点を排除して結合
-      return results1.slice(0, results1.length - 1).concat(results2);
-    } else {
-      // 誤差が十分に小さければ、中間の細かなギザギザ（曲線含む）はすべて直線とみなし両端だけ残す
-      return [points[0], points[end]];
+    const { vertices, indices } = mesh;
+    for (let i = 0; i < indices.length; i += 3) {
+      ctx.beginPath();
+      ctx.moveTo(vertices[indices[i] * 2], vertices[indices[i] * 2 + 1]);
+      ctx.lineTo(vertices[indices[i + 1] * 2], vertices[indices[i + 1] * 2 + 1]);
+      ctx.lineTo(vertices[indices[i + 2] * 2], vertices[indices[i + 2] * 2 + 1]);
+      ctx.closePath();
+      ctx.fill();
     }
   }
 
   /**
-   * 4. 点と直線の最短距離を計算するヘルパー（安全版）
+   * SVG要素を使って極細線(0.3px)でワイヤーフレームをプレビューする
    */
-  function getOrthogonalDistance(point, lineStart, lineEnd) {
-    const dx = lineEnd.x - lineStart.x;
-    const dy = lineEnd.y - lineStart.y;
+  function drawMeshSVG(svg, mesh) {
+    const { vertices, indices } = mesh;
+    let pathData = "";
 
-    // 万が一、始点と終点が完全に一致していた場合の安全処理（点と点の距離を返す）
-    const bottom = Math.sqrt(dx * dx + dy * dy);
-    if (bottom === 0) {
-      const splitDx = point.x - lineStart.x;
-      const splitDy = point.y - lineStart.y;
-      return Math.sqrt(splitDx * splitDx + splitDy * splitDy);
+    // 数千〜数万ポリゴンでもブラウザが耐えられるように、1つの長い「d」属性として構築します
+    for (let i = 0; i < indices.length; i += 3) {
+      const v1x = vertices[indices[i] * 2], v1y = vertices[indices[i] * 2 + 1];
+      const v2x = vertices[indices[i + 1] * 2], v2y = vertices[indices[i + 1] * 2 + 1];
+      const v3x = vertices[indices[i + 2] * 2], v3y = vertices[indices[i + 2] * 2 + 1];
+
+      pathData += `M ${v1x} ${v1y} L ${v2x} ${v2y} L ${v3x} ${v3y} Z `;
     }
 
-    // 点と直線の距離の公式
-    const area = Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x);
-    return area / bottom;
+    // 中身をクリア
+    svg.innerHTML = "";
+
+    // 極細のパスを作成してSVGに追加
+    const pathObj = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    pathObj.setAttribute("d", pathData);
+    pathObj.setAttribute("stroke", "#8B0000"); // 線の色
+    pathObj.setAttribute("stroke-width", "0.3"); // 【極細線】
+    pathObj.setAttribute("fill", "none");
+    pathObj.setAttribute("stroke-linejoin", "round");
+
+    svg.appendChild(pathObj);
   }
 
-  function analyzeInclusionRelationship(allSimplifiedLines) {
-    // 1. 各ポリゴンの面積と巻き方向（CW:時計回り / CCW:反時計回り）を計算
-    // 抽出直後の二値化画像からは、外周(Outer)と内周(Inner)で必ず巻き方向が逆になります。
-    const polygons = allSimplifiedLines.map((line, index) => {
-      let area = 0;
-      for (let i = 0; i < line.length; i++) {
-        const j = (i + 1) % line.length;
-        area += line[i].x * line[j].y - line[j].x * line[i].y;
-      }
-      area /= 2;
-
-      // AABB (Bounding Box) を計算して、当たり判定の高速化と正確性を担保
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      line.forEach(p => {
-        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
-      });
-
-      return {
-        index: index,
-        line: line,
-        area: Math.abs(area),
-        isCCW: area < 0, // 巻き方向
-        bounds: { minX, maxX, minY, maxY }
-      };
-    });
-
-    // 2. 面積が大きい順にソート（大きいポリゴンほど「親」になりやすいため）
-    polygons.sort((a, b) => b.area - a.area);
-
-    // 3. 階層構造（親子関係）の決定
-    const lineInfos = polygons.map(target => {
-      let directParent = null;
-      let minParentArea = Infinity;
-
-      // 自分より面積が大きいポリゴン（親の候補）だけをチェック
-      polygons.forEach(potentialParent => {
-        if (target.index === potentialParent.index) return;
-        if (potentialParent.area <= target.area) return;
-
-        // 簡易判定：そもそもBounding Boxに完全に入っているか
-        const tb = target.bounds;
-        const pb = potentialParent.bounds;
-        if (tb.minX >= pb.minX && tb.maxX <= pb.maxX && tb.minY >= pb.minY && tb.maxY <= pb.maxY) {
-
-          // 厳密なレイキャスティング判定（複数点でチェックして頑健性を高める）
-          let insideCount = 0;
-          const testPoints = [
-            target.line[0],
-            target.line[Math.floor(target.line.length / 2)],
-            { x: (tb.minX + tb.maxX) / 2, y: (tb.minY + tb.maxY) / 2 } // 中心点
-          ];
-
-          testPoints.forEach(pt => {
-            if (robustIsPointInPolygon(pt, potentialParent.line)) {
-              insideCount++;
-            }
-          });
-
-          // 過半数が内側に入っているなら内包されているとみなす
-          if (insideCount >= 2) {
-            // 最も内側（＝面積が最も小さい親）を直接の親とする
-            if (potentialParent.area < minParentArea) {
-              minParentArea = potentialParent.area;
-              directParent = potentialParent.index;
-            }
-          }
-        }
-      });
-
-      return {
-        index: target.index,
-        line: target.line,
-        directParent: directParent
-      };
-    });
-
-    // 4. 親カウント（深さ）を計算してツリーを組み立て
-    lineInfos.forEach(info => {
-      let count = 0;
-      let p = info.directParent;
-      while (p !== null) {
-        count++;
-        const parentInfo = lineInfos.find(item => item.index === p);
-        p = parentInfo ? parentInfo.directParent : null;
-      }
-      info.parentCount = count;
-    });
-
-    function buildTree(parentIndex, depth) {
-      const children = lineInfos.filter(info =>
-        parentIndex === null ? info.parentCount === 0 : info.directParent === parentIndex
-      );
-
-      return children.map(child => {
-        const type = (depth % 2 === 0) ? "outer" : "inner";
-        return {
-          type: type,
-          lines: child.line.map(p => [p.x, p.y]),
-          contents: buildTree(child.index, depth + 1)
-        };
-      });
-    }
-
-    return buildTree(null, 0);
-  }
-
-  /**
-   * レイキャスティング法のバグ（エッジ上の不確定性）を排除した堅牢な内外判定
-   */
-  function robustIsPointInPolygon(point, polygon) {
-    let inside = false;
-    const x = point.x, y = point.y;
-
-    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      const xi = polygon[i].x, yi = polygon[i].y;
-      const xj = polygon[j].x, yj = polygon[j].y;
-
-      // 完全にエッジ上、あるいは頂点上に乗っている場合の微小なブレを許容
-      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
-        inside = !inside;
-      }
-    }
-    return inside;
-  }
-
-  /**
-   * 独自実装のポリゴン三角形分割（穴対応型・耳切り法ベース）
-   * @param {Array<Object>} treeData - analyzeInclusionRelationship の返り値
-   * @returns {Array<{vertices: number[], indices: number[]}>} メッシュデータの配列
-   */
-  function generateMeshWithoutLibrary(treeData) {
-    const meshes = [];
-
-    treeData.forEach(rootNode => {
-      if (rootNode.type !== "outer") return;
-
-      // --- 1. 穴（Inner）を外周（Outer）に結合して一本の閉じたパスにする ---
-      // 外周のコピー（オブジェクト構造から {x, y, id} の形へマッピング）
-      let combinedPolygon = rootNode.lines.map((p, i) => ({ x: p[0], y: p[1], id: i }));
-      let globalVertices = rootNode.lines.map(p => ({ x: p[0], y: p[1] }));
-
-      // 穴を一つずつ外周に結合
-      rootNode.contents.forEach(childNode => {
-        if (childNode.type !== "inner") return;
-
-        const hole = childNode.lines.map(p => ({ x: p[0], y: p[1] }));
-        // 穴の頂点もグローバルな頂点リストに登録
-        const holeStartIdx = globalVertices.length;
-        hole.forEach(p => globalVertices.push({ x: p.x, y: p.y }));
-        const holePolygon = hole.map((p, i) => ({ x: p.x, y: p.y, id: holeStartIdx + i }));
-
-        combinedPolygon = bridgeHoleToOuter(combinedPolygon, holePolygon);
-      });
-
-      // --- 2. 一筆書きになったポリゴンを耳切り法で三角形に分割 ---
-      const indices = [];
-      let polygon = [...combinedPolygon];
-
-      // 時計回り(CW)か反時計回り(CCW)かを判定し、耳切り法のために頂点順序を標準化
-      if (getPolygonArea(polygon) < 0) {
-        polygon.reverse();
-      }
-
-      // 頂点が3つになるまで切り落としループ
-      let timeout = polygon.length * 2; // 無限ループ防止策
-      while (polygon.length > 2 && timeout > 0) {
-        timeout--;
-        let earFound = false;
-
-        for (let i = 0; i < polygon.length; i++) {
-          const prev = polygon[(i - 1 + polygon.length) % polygon.length];
-          const curr = polygon[i];
-          const next = polygon[(i + 1) % polygon.length];
-
-          // 1. 凸判定（内角が180度未満か）
-          if (crossProduct(prev, curr, next) <= 0) continue;
-
-          // 2. 判定対象の三角形(prev, curr, next)の内部に、他の頂点が含まれていないか
-          let hasPointInside = false;
-          for (let j = 0; j < polygon.length; j++) {
-            const p = polygon[j];
-            if (p.id === prev.id || p.id === curr.id || p.id === next.id) continue;
-
-            if (isPointInTriangle(p, prev, curr, next)) {
-              hasPointInside = true;
-              break;
-            }
-          }
-
-          // 耳が見つかったら切り落とす
-          if (!hasPointInside) {
-            indices.push(prev.id, curr.id, next.id);
-            polygon.splice(i, 1); // 現在の頂点を除去
-            earFound = true;
-            break;
-          }
-        }
-
-        if (!earFound) {
-          // 幾何学的な誤差や自己交差で耳が見つからない場合の安全弁
-          // 最悪の場合、無理やり最初の3点で三角形を作る
-          indices.push(polygon[0].id, polygon[1].id, polygon[2].id);
-          polygon.splice(1, 1);
-        }
-      }
-
-      // 出力用にフラットな座標配列 [x0,y0, x1,y1, ...] に変換
-      const verticesFlat = [];
-      globalVertices.forEach(v => verticesFlat.push(v.x, v.y));
-
-      meshes.push({
-        vertices: verticesFlat,
-        indices: indices
-      });
-    });
-
-    return meshes;
-  }
-
-  /**
-   * 外周ポリゴンと穴ポリゴンを最短距離の直線（ブリッジ）で結合する
-   */
-  function bridgeHoleToOuter(outer, hole) {
-    let maxOuterIdx = 0;
-    let maxHoleIdx = 0;
-    let minDistance = Infinity;
-
-    // 穴の頂点と外周の頂点の間で、もっとも距離が近いペアを探す
-    // （X座標が最大となる穴の頂点から右にレイを飛ばす方法が一般的ですが、総当たりが最も頑健です）
-    for (let i = 0; i < outer.length; i++) {
-      for (let j = 0; j < hole.length; j++) {
-        const dx = outer[i].x - hole[j].x;
-        const dy = outer[i].y - hole[j].y;
-        const dist = dx * dx + dy * dy;
-        if (dist < minDistance) {
-          minDistance = dist;
-          maxOuterIdx = i;
-          maxHoleIdx = j;
-        }
-      }
-    }
-
-    const bridged = [];
-    // 1. 外周のスタートから結合点までコピー
-    for (let i = 0; i <= maxOuterIdx; i++) bridged.push(outer[i]);
-
-    // 2. 穴を結合点から1周コピーして戻ってくる
-    for (let j = 0; j <= hole.length; j++) {
-      bridged.push(hole[(maxHoleIdx + j) % hole.length]);
-    }
-
-    // 3. 外周の結合点から最後までをコピー
-    for (let i = maxOuterIdx; i < outer.length; i++) bridged.push(outer[i]);
-
-    return bridged;
-  }
-
-  /**
-   * ベクトルの外積（凸判定・巻き方向判定用）
-   */
-  function crossProduct(p1, p2, p3) {
-    return (p2.x - p1.x) * (p3.y - p2.y) - (p2.y - p1.y) * (p3.x - p2.x);
-  }
-
-  /**
-   * ポリゴンの符号付き面積を計算（方向判定用）
-   */
-  function getPolygonArea(polygon) {
-    let area = 0;
-    for (let i = 0; i < polygon.length; i++) {
-      const j = (i + 1) % polygon.length;
-      area += polygon[i].x * polygon[j].y;
-      area -= polygon[j].x * polygon[i].y;
-    }
-    return area / 2;
-  }
-
-  /**
-   * 点pが三角形(a, b, c)の内部にあるかどうかの判定
-   */
-  function isPointInTriangle(p, a, b, c) {
-    const cp1 = crossProduct(a, b, p);
-    const cp2 = crossProduct(b, c, p);
-    const cp3 = crossProduct(c, a, p);
-
-    // すべての外積の符号が一致していれば内部にある
-    return ((cp1 >= 0 && cp2 >= 0 && cp3 >= 0) || (cp1 <= 0 && cp2 <= 0 && cp3 <= 0));
-  }
-
-  /**
-   * 独自実装の2D三角メッシュ構造から3D立体(押し出し面)を形成し、OBJ形式の文字列に変換する関数
-   * @param {Array} meshes - generateMeshWithoutLibrary の返り値（vertices, indices を持つオブジェクトの配列）
-   * @param {number} thickness - 押し出す立体(Z方向)の厚み
-   * @returns {string} Wavefront OBJフォーマットのテキスト
-   */
   function exportToOBJ(meshes, thickness = 10.0) {
     let objLines = [];
     objLines.push("# Wavefront OBJ file exported from Image to Emboss Processor");
-    objLines.push("# Generated on demand via custom Ear Clipping triangulation");
+    objLines.push("# Generated via Smooth Marching Squares");
 
     let vertexOffset = 1; // OBJのインデックスは1から始まります
 
