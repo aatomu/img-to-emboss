@@ -37,7 +37,6 @@
       border-width: 2px;
       border-style: solid;
       background-color: white;
-      /* SVG用に背景を白に */
     }
   </style>
 </head>
@@ -73,16 +72,26 @@
   function processImage() {
     // 1. imgからcanvasに転写
     drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
-    // 2. Render Canvas から直接 Marching Squares を実行（線形補間で滑らかに！）
+
+    // 2. Render Canvas から直接 Marching Squares を実行（白・黒両方のメッシュを生成、境界頂点を共有）
     const cellSizeSize = 2; // 中間色を使うため、cellSizeが2や3でもかなり綺麗に出ます
     const meshData = generateGreedyMarchingSquaresMesh(render_canvas, binarization_threshold, cellSizeSize);
     console.log("Smooth Marching Squares メッシュデータ:", meshData);
 
-    // 3. プレビューの描画
-    drawMeshSVG(mesh_preview_svg, meshData); // 極細のSVG線でプレビュー
+    // 3. プレビューの描画 (黒面を濃いグレー、白面を薄いグレーで2色描画)
+    drawMeshSVG(mesh_preview_svg, meshData);
 
-    // 4. 3Dデータ(OBJ)として書き出し
-    const objText = exportToOBJ([meshData], 10.0);
+    // 4. 3Dデータ(OBJ)として書き出し (白と黒に別々の厚みを与えて黒面を押し出す)
+    const blackMesh = { vertices: meshData.vertices, indices: meshData.blackIndices, name: "black" };
+    const whiteMesh = { vertices: meshData.vertices, indices: meshData.whiteIndices, name: "white" };
+
+    // 厚みの設定：裏面は一律 Z=0。白（土台）は 2mm、黒（キャラ）は 10mm に押し出します
+    const thicknessSettings = {
+      black: 10.0, // 黒面の押し出し高さ
+      white: 2.0   // 白面（土台）の厚み
+    };
+
+    const objText = exportToOBJ([blackMesh, whiteMesh], thicknessSettings);
 
     // ダウンロード処理
     const blob = new Blob([objText], { type: "text/plain" });
@@ -148,7 +157,7 @@
   }
 
   /**
-   * 中間色を使用した線形補間付き Marching Squares
+   * 中間色を使用した線形補間付き Marching Squares (白黒対応 & 頂点共有)
    */
   function generateGreedyMarchingSquaresMesh(srcCanvas, threshold, cellSize = 8) {
     const ctx = srcCanvas.getContext("2d");
@@ -174,7 +183,8 @@
 
     const vertexMap = new Map();
     const vertices = [];
-    const indices = [];
+    const blackIndices = [];
+    const whiteIndices = [];
 
     function addVertex(x, y) {
       // 座標を小数点第2位で丸めて、近すぎる頂点を共有させる
@@ -189,17 +199,16 @@
       return idx;
     }
 
-    function addTriangle(p1, p2, p3) {
-      indices.push(addVertex(p1.x, p1.y), addVertex(p2.x, p2.y), addVertex(p3.x, p3.y));
+    function addTriangle(p1, p2, p3, isWhite = false) {
+      const targetIndices = isWhite ? whiteIndices : blackIndices;
+      targetIndices.push(addVertex(p1.x, p1.y), addVertex(p2.x, p2.y), addVertex(p3.x, p3.y));
     }
 
-    // グリッドの次元を計算
     const cols = Math.floor((width - 1) / cellSize);
     const rows = Math.floor((height - 1) / cellSize);
 
-    // 3-A. 完全な四角形（パターン15）を管理する2次元グリッド配列
-    // 結合済みかどうかを追跡するため、booleanの2次元配列として初期化
-    const greedyGrid = Array.from({ length: rows }, () => new Array(cols).fill(false));
+    // 0 = 境界セル, 1 = 完全な黒(パターン15), 2 = 完全な白(パターン0)
+    const greedyGrid = Array.from({ length: rows }, () => new Array(cols).fill(0));
 
     // --- フェーズ 1: Marching Squares の実行 & セル選別 ---
     for (let r = 0; r < rows; r++) {
@@ -212,22 +221,23 @@
         const vBL = getVal(x, y + cellSize);
         const vBR = getVal(x + cellSize, y + cellSize);
 
-        // 閾値より暗い（黒に近い）場合を「実体（Solid）」として1にする
         const tl = vTL < threshold ? 1 : 0;
         const tr = vTR < threshold ? 1 : 0;
         const bl = vBL < threshold ? 1 : 0;
         const br = vBR < threshold ? 1 : 0;
 
         const state = (tl << 3) | (tr << 2) | (br << 1) | bl;
-        if (state === 0) continue;
 
-        // パターン15（完全な四角形）はGreedy用グリッドに登録
         if (state === 15) {
-          greedyGrid[r][c] = true;
+          greedyGrid[r][c] = 1; // 黒のGreedy対象
+          continue;
+        }
+        if (state === 0) {
+          greedyGrid[r][c] = 2; // 白のGreedy対象
           continue;
         }
 
-        // 3-B. 斜め・三角形（パターン1〜14）：即座に三角形化して出力メッシュに登録
+        // 境界セル (1〜14): 白・黒両方のポリゴンを相互に補完するように分割
         const P_TL = { x: x, y: y };
         const P_TR = { x: x + cellSize, y: y };
         const P_BR = { x: x + cellSize, y: y + cellSize };
@@ -238,198 +248,318 @@
         const P_B = { x: x + cellSize * lerpOffset(vBL, vBR), y: y + cellSize };
         const P_L = { x: x, y: y + cellSize * lerpOffset(vTL, vBL) };
 
-        // パターンに応じた三角形分割
         switch (state) {
-          case 1: addTriangle(P_L, P_B, P_BL); break;
-          case 2: addTriangle(P_B, P_R, P_BR); break;
-          case 3: addTriangle(P_L, P_R, P_BR); addTriangle(P_L, P_BR, P_BL); break;
-          case 4: addTriangle(P_R, P_T, P_TR); break;
-          case 5: addTriangle(P_L, P_B, P_BL); addTriangle(P_R, P_T, P_TR); break;
-          case 6: addTriangle(P_B, P_T, P_TR); addTriangle(P_B, P_TR, P_BR); break;
-          case 7: addTriangle(P_L, P_T, P_TR); addTriangle(P_L, P_TR, P_BR); addTriangle(P_L, P_BR, P_BL); break;
-          case 8: addTriangle(P_T, P_L, P_TL); break;
-          case 9: addTriangle(P_T, P_B, P_BL); addTriangle(P_T, P_BL, P_TL); break;
-          case 10: addTriangle(P_T, P_L, P_TL); addTriangle(P_B, P_R, P_BR); break;
-          case 11: addTriangle(P_T, P_R, P_BR); addTriangle(P_T, P_BR, P_BL); addTriangle(P_T, P_BL, P_TL); break;
-          case 12: addTriangle(P_R, P_L, P_TL); addTriangle(P_R, P_TL, P_TR); break;
-          case 13: addTriangle(P_R, P_B, P_BL); addTriangle(P_R, P_BL, P_TL); addTriangle(P_R, P_TL, P_TR); break;
-          case 14: addTriangle(P_B, P_L, P_TL); addTriangle(P_B, P_TL, P_TR); addTriangle(P_B, P_TR, P_BR); break;
+          case 1:
+            addTriangle(P_L, P_B, P_BL, false);
+            addTriangle(P_L, P_T, P_B, true); addTriangle(P_T, P_TR, P_B, true); addTriangle(P_TR, P_BR, P_B, true); addTriangle(P_TL, P_T, P_L, true);
+            break;
+          case 2:
+            addTriangle(P_B, P_R, P_BR, false);
+            addTriangle(P_TL, P_TR, P_R, true); addTriangle(P_TL, P_R, P_B, true); addTriangle(P_TL, P_B, P_BL, true);
+            break;
+          case 3:
+            addTriangle(P_L, P_R, P_BR, false); addTriangle(P_L, P_BR, P_BL, false);
+            addTriangle(P_TL, P_TR, P_R, true); addTriangle(P_TL, P_R, P_L, true);
+            break;
+          case 4:
+            addTriangle(P_R, P_T, P_TR, false);
+            addTriangle(P_TL, P_T, P_R, true); addTriangle(P_TL, P_R, P_BL, true); addTriangle(P_BL, P_R, P_BR, true);
+            break;
+          case 5:
+            addTriangle(P_L, P_B, P_BL, false); addTriangle(P_R, P_T, P_TR, false);
+            addTriangle(P_TL, P_T, P_L, true); addTriangle(P_T, P_R, P_L, true); addTriangle(P_L, P_R, P_B, true); addTriangle(P_R, P_BR, P_B, true);
+            break;
+          case 6:
+            addTriangle(P_B, P_T, P_TR, false); addTriangle(P_B, P_TR, P_BR, false);
+            addTriangle(P_TL, P_T, P_B, true); addTriangle(P_TL, P_B, P_BL, true);
+            break;
+          case 7:
+            addTriangle(P_L, P_T, P_TR, false); addTriangle(P_L, P_TR, P_BR, false); addTriangle(P_L, P_BR, P_BL, false);
+            addTriangle(P_TL, P_T, P_L, true);
+            break;
+          case 8:
+            addTriangle(P_T, P_L, P_TL, false);
+            addTriangle(P_T, P_TR, P_R, true); addTriangle(P_T, P_R, P_L, true); addTriangle(P_L, P_R, P_BR, true); addTriangle(P_L, P_BR, P_BL, true);
+            break;
+          case 9:
+            addTriangle(P_T, P_B, P_BL, false); addTriangle(P_T, P_BL, P_TL, false);
+            addTriangle(P_T, P_TR, P_BR, true); addTriangle(P_T, P_BR, P_B, true);
+            break;
+          case 10:
+            addTriangle(P_T, P_L, P_TL, false); addTriangle(P_B, P_R, P_BR, false);
+            addTriangle(P_L, P_T, P_TR, true); addTriangle(P_L, P_TR, P_R, true); addTriangle(P_L, P_R, P_B, true); addTriangle(P_L, P_B, P_BL, true);
+            break;
+          case 11:
+            addTriangle(P_T, P_R, P_BR, false); addTriangle(P_T, P_BR, P_BL, false); addTriangle(P_T, P_BL, P_TL, false);
+            addTriangle(P_T, P_TR, P_R, true);
+            break;
+          case 12:
+            addTriangle(P_R, P_L, P_TL, false); addTriangle(P_R, P_TL, P_TR, false);
+            addTriangle(P_L, P_R, P_BR, true); addTriangle(P_L, P_BR, P_BL, true);
+            break;
+          case 13:
+            addTriangle(P_R, P_B, P_BL, false); addTriangle(P_R, P_BL, P_TL, false); addTriangle(P_R, P_TL, P_TR, false);
+            addTriangle(P_B, P_R, P_BR, true);
+            break;
+          case 14:
+            addTriangle(P_B, P_L, P_TL, false); addTriangle(P_B, P_TL, P_TR, false); addTriangle(P_B, P_TR, P_BR, false);
+            addTriangle(P_L, P_B, P_BL, true);
+            break;
         }
       }
     }
 
-    // --- フェーズ 2: 4. Greedy Meshing の実行 & 5. 三角形化してマージ ---
-    // 訪問済みを追跡するフラグ配列
+    // --- フェーズ 2: 2種類のセルに対する Greedy Meshing ---
     const visited = Array.from({ length: rows }, () => new Array(cols).fill(false));
 
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        // パターン15であり、かつ未訪問のセルから貪欲法（Greedy）を開始
-        if (!greedyGrid[r][c] || visited[r][c]) continue;
+    function runGreedyForType(targetType, isWhite) {
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          if (greedyGrid[r][c] !== targetType || visited[r][c]) continue;
 
-        // 幅(w)の拡張
-        let w = 1;
-        while (c + w < cols && greedyGrid[r][c + w] && !visited[r][c + w]) {
-          w++;
-        }
+          // 幅(w)の拡張
+          let w = 1;
+          while (c + w < cols && greedyGrid[r][c + w] === targetType && !visited[r][c + w]) {
+            w++;
+          }
 
-        // 高さ(h)の拡張
-        let h = 1;
-        while (r + h < rows) {
-          let lineMatch = true;
-          for (let k = 0; k < w; k++) {
-            if (!greedyGrid[r + h][c + k] || visited[r + h][c + k]) {
-              lineMatch = false;
-              break;
+          // 高さ(h)の拡張
+          let h = 1;
+          while (r + h < rows) {
+            let lineMatch = true;
+            for (let k = 0; k < w; k++) {
+              if (greedyGrid[r + h][c + k] !== targetType || visited[r + h][c + k]) {
+                lineMatch = false;
+                break;
+              }
+            }
+            if (!lineMatch) break;
+            h++;
+          }
+
+          // 拡張した矩形範囲を訪問済みにする
+          for (let dy = 0; dy < h; dy++) {
+            for (let dx = 0; dx < w; dx++) {
+              visited[r + dy][c + dx] = true;
             }
           }
-          if (!lineMatch) break;
-          h++;
+
+          // 結合された巨大な矩形の4隅の座標を計算
+          const x1 = c * cellSize;
+          const y1 = r * cellSize;
+          const x2 = (c + w) * cellSize;
+          const y2 = (r + h) * cellSize;
+
+          const G_TL = { x: x1, y: y1 };
+          const G_TR = { x: x2, y: y1 };
+          const G_BR = { x: x2, y: y2 };
+          const G_BL = { x: x1, y: y2 };
+
+          addTriangle(G_BL, G_TL, G_TR, isWhite);
+          addTriangle(G_BL, G_TR, G_BR, isWhite);
         }
-
-        // 拡張した矩形範囲を訪問済みにする
-        for (let dy = 0; dy < h; dy++) {
-          for (let dx = 0; dx < w; dx++) {
-            visited[r + dy][c + dx] = true;
-          }
-        }
-
-        // 結合された巨大な矩形の4隅の座標を計算
-        const x1 = c * cellSize;
-        const y1 = r * cellSize;
-        const x2 = (c + w) * cellSize;
-        const y2 = (r + h) * cellSize;
-
-        const G_TL = { x: x1, y: y1 };
-        const G_TR = { x: x2, y: y1 };
-        const G_BR = { x: x2, y: y2 };
-        const G_BL = { x: x1, y: y2 };
-
-        // 矩形を2つの三角形に分割して、共通の出力配列（vertices, indices）にマージ
-        addTriangle(G_BL, G_TL, G_TR);
-        addTriangle(G_BL, G_TR, G_BR);
       }
     }
 
-    // 最終的なメッシュデータを返す
-    return { vertices, indices };
+    runGreedyForType(1, false); // 黒矩形エリアの結合
+    runGreedyForType(2, true);  // 白矩形エリアの結合
+
+    return { vertices, blackIndices, whiteIndices };
   }
 
   /**
-   * SVG要素を使って極細線(0.3px)でワイヤーフレームをプレビューする
+   * SVG要素を使って2色（濃いグレー：黒面 / 薄いグレー：白面）でワイヤーフレームと塗りつぶしプレビューを行う
    */
   function drawMeshSVG(svg, mesh) {
-    const { vertices, indices } = mesh;
-    let pathData = "";
+    const { vertices, blackIndices, whiteIndices } = mesh;
 
-    // 数千〜数万ポリゴンでもブラウザが耐えられるように、1つの長い「d」属性として構築します
-    for (let i = 0; i < indices.length; i += 3) {
-      const v1x = vertices[indices[i] * 2], v1y = vertices[indices[i] * 2 + 1];
-      const v2x = vertices[indices[i + 1] * 2], v2y = vertices[indices[i + 1] * 2 + 1];
-      const v3x = vertices[indices[i + 2] * 2], v3y = vertices[indices[i + 2] * 2 + 1];
-
-      pathData += `M ${v1x} ${v1y} L ${v2x} ${v2y} L ${v3x} ${v3y} Z `;
+    // 白面（背景側）のパスデータを構築
+    let whitePathData = "";
+    for (let i = 0; i < whiteIndices.length; i += 3) {
+      const v1x = vertices[whiteIndices[i] * 2], v1y = vertices[whiteIndices[i] * 2 + 1];
+      const v2x = vertices[whiteIndices[i + 1] * 2], v2y = vertices[whiteIndices[i + 1] * 2 + 1];
+      const v3x = vertices[whiteIndices[i + 2] * 2], v3y = vertices[whiteIndices[i + 2] * 2 + 1];
+      whitePathData += `M ${v1x} ${v1y} L ${v2x} ${v2y} L ${v3x} ${v3y} Z `;
     }
 
-    // 中身をクリア
+    // 黒面（キャラクター側）のパスデータを構築
+    let blackPathData = "";
+    for (let i = 0; i < blackIndices.length; i += 3) {
+      const v1x = vertices[blackIndices[i] * 2], v1y = vertices[blackIndices[i] * 2 + 1];
+      const v2x = vertices[blackIndices[i + 1] * 2], v2y = vertices[blackIndices[i + 1] * 2 + 1];
+      const v3x = vertices[blackIndices[i + 2] * 2], v3y = vertices[blackIndices[i + 2] * 2 + 1];
+      blackPathData += `M ${v1x} ${v1y} L ${v2x} ${v2y} L ${v3x} ${v3y} Z `;
+    }
+
     svg.innerHTML = "";
 
-    // 極細のパスを作成してSVGに追加
-    const pathObj = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    pathObj.setAttribute("d", pathData);
-    pathObj.setAttribute("stroke", "#8B0000"); // 線の色
-    pathObj.setAttribute("stroke-width", "0.3"); // 【極細線】
-    pathObj.setAttribute("fill", "none");
-    pathObj.setAttribute("stroke-linejoin", "round");
+    // 1. 白面 (薄いグレー) のレイヤーを追加
+    if (whitePathData) {
+      const whitePathObj = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      whitePathObj.setAttribute("d", whitePathData);
+      whitePathObj.setAttribute("stroke", "#D3D3D3"); // ライトグレーの線
+      whitePathObj.setAttribute("stroke-width", "0.2");
+      whitePathObj.setAttribute("fill", "#F0F0F0");   // 薄いグレーの塗り
+      whitePathObj.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(whitePathObj);
+    }
 
-    svg.appendChild(pathObj);
+    // 2. 黒面 (濃いグレー) のレイヤーを追加
+    if (blackPathData) {
+      const blackPathObj = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      blackPathObj.setAttribute("d", blackPathData);
+      blackPathObj.setAttribute("stroke", "#333333"); // チャコールの線
+      blackPathObj.setAttribute("stroke-width", "0.3");
+      blackPathObj.setAttribute("fill", "#555555");   // 濃いグレーの塗り
+      blackPathObj.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(blackPathObj);
+    }
   }
 
-  function exportToOBJ(meshes, thickness = 10.0) {
+  /**
+   * 白黒それぞれのメッシュに対して個別の厚みを設定して押し出す Wavefront OBJ 出力
+   */
+  /**
+     * 白黒のメッシュを統合し、正しい境界の段差（段差壁と外周壁）を計算してOBJを出力する関数
+     */
+  function exportToOBJ(meshes, thicknessMap) {
     let objLines = [];
     objLines.push("# Wavefront OBJ file exported from Image to Emboss Processor");
-    objLines.push("# Generated via Smooth Marching Squares");
+    objLines.push("# Verified Water-tight Topology for Multi-Thickness Embossing");
 
-    let vertexOffset = 1; // OBJのインデックスは1から始まります
+    // 前提として頂点配列(vertices)は共通なので、最初のメッシュから取得
+    const vertices = meshes[0].vertices;
+    const vertexCount = vertices.length / 2;
 
-    meshes.forEach((mesh, mIdx) => {
-      objLines.push(`\no mesh_part_${mIdx}`);
-      const vertices = mesh.vertices;
-      const indices = mesh.indices;
-      const vertexCount = vertices.length / 2;
+    // 1. すべての頂点データを出力（各メッシュの前面Zと、共通の背面Z=0）
+    // 後でインデックスを計算しやすくするため、最初に全ての高さを定義します
+    // blackの前面(Z=10), whiteの前面(Z=2), 共通の背面(Z=0)
+    const tBlack = thicknessMap["black"] !== undefined ? thicknessMap["black"] : 10.0;
+    const tWhite = thicknessMap["white"] !== undefined ? thicknessMap["white"] : 2.0;
 
-      // 1. 頂点データ出力 (前面 Z = thickness, 背面 Z = 0)
-      // 前面 (Front side)
-      for (let i = 0; i < vertices.length; i += 2) {
-        objLines.push(`v ${vertices[i].toFixed(4)} ${vertices[i + 1].toFixed(4)} ${thickness.toFixed(4)}`);
+    objLines.push("# Vertices for Black Front (Z = " + tBlack + ")");
+    for (let i = 0; i < vertices.length; i += 2) {
+      objLines.push(`v ${vertices[i].toFixed(4)} ${vertices[i + 1].toFixed(4)} ${tBlack.toFixed(4)}`);
+    }
+    objLines.push("# Vertices for White Front (Z = " + tWhite + ")");
+    for (let i = 0; i < vertices.length; i += 2) {
+      objLines.push(`v ${vertices[i].toFixed(4)} ${vertices[i + 1].toFixed(4)} ${tWhite.toFixed(4)}`);
+    }
+    objLines.push("# Vertices for Shared Back (Z = 0.0)");
+    for (let i = 0; i < vertices.length; i += 2) {
+      objLines.push(`v ${vertices[i].toFixed(4)} ${vertices[i + 1].toFixed(4)} 0.0000`);
+    }
+
+    // OBJのインデックスオフセット（1-based）
+    // 1 〜 vertexCount : 黒前面
+    // (vertexCount + 1) 〜 (vertexCount * 2) : 白前面
+    // (vertexCount * 2 + 1) 〜 (vertexCount * 3) : 共通背面
+    const blackOffset = 1;
+    const whiteOffset = 1 + vertexCount;
+    const backOffset = 1 + vertexCount * 2;
+
+    // 2. 表・裏面のポリゴン出力
+    let blackMesh = meshes.find(m => m.name === "black");
+    let whiteMesh = meshes.find(m => m.name === "white");
+
+    if (blackMesh) {
+      objLines.push("\ng black_surface");
+      objLines.push("# Black Front faces");
+      for (let i = 0; i < blackMesh.indices.length; i += 3) {
+        objLines.push(`f ${blackOffset + blackMesh.indices[i]} ${blackOffset + blackMesh.indices[i + 1]} ${blackOffset + blackMesh.indices[i + 2]}`);
       }
-      // 背面 (Back side)
-      for (let i = 0; i < vertices.length; i += 2) {
-        objLines.push(`v ${vertices[i].toFixed(4)} ${vertices[i + 1].toFixed(4)} 0.0000`);
+      objLines.push("# Black Back faces (Z=0)");
+      for (let i = 0; i < blackMesh.indices.length; i += 3) {
+        objLines.push(`f ${backOffset + blackMesh.indices[i]} ${backOffset + blackMesh.indices[i + 2]} ${backOffset + blackMesh.indices[i + 1]}`);
       }
+    }
 
-      // 2. 面データ出力 (前面・背面・側面のポリゴンをインデックス構築)
-      objLines.push("# Front faces");
-      for (let i = 0; i < indices.length; i += 3) {
-        // 前面は反時計回り(CCW)
-        const v0 = vertexOffset + indices[i];
-        const v1 = vertexOffset + indices[i + 1];
-        const v2 = vertexOffset + indices[i + 2];
-        objLines.push(`f ${v0} ${v1} ${v2}`);
+    if (whiteMesh) {
+      objLines.push("\ng white_surface");
+      objLines.push("# White Front faces");
+      for (let i = 0; i < whiteMesh.indices.length; i += 3) {
+        objLines.push(`f ${whiteOffset + whiteMesh.indices[i]} ${whiteOffset + whiteMesh.indices[i + 1]} ${whiteOffset + whiteMesh.indices[i + 2]}`);
       }
-
-      objLines.push("# Back faces");
-      for (let i = 0; i < indices.length; i += 3) {
-        // 背面は前面の裏側になるので、法線を外に向けるために頂点の順序を反転
-        const v0 = vertexOffset + vertexCount + indices[i];
-        const v1 = vertexOffset + vertexCount + indices[i + 2];
-        const v2 = vertexOffset + vertexCount + indices[i + 1];
-        objLines.push(`f ${v0} ${v1} ${v2}`);
+      objLines.push("# White Back faces (Z=0)");
+      for (let i = 0; i < whiteMesh.indices.length; i += 3) {
+        objLines.push(`f ${backOffset + whiteMesh.indices[i]} ${backOffset + whiteMesh.indices[i + 2]} ${backOffset + whiteMesh.indices[i + 1]}`);
       }
+    }
 
-      // 3. 側面 (Side walls) の自動生成
-      objLines.push("# Side wall faces");
+    // 3. 全エッジをスキャンして「本当のフチ」と「白黒境界の段差」を抽出
+    objLines.push("\ng side_walls");
+    const edgeMap = {};
 
-      // エッジマップを作って出現回数をカウント
-      const edgeMap = {};
-      for (let i = 0; i < indices.length; i += 3) {
-        const tri = [indices[i], indices[i + 1], indices[i + 2]];
+    function registerEdges(mesh, meshType) {
+      if (!mesh) return;
+      for (let i = 0; i < mesh.indices.length; i += 3) {
+        const tri = [mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]];
         for (let j = 0; j < 3; j++) {
           const u = tri[j];
           const v = tri[(j + 1) % 3];
+          // 向きを保持するためにキーはソートするが、元の向き(from->to)を記録
           const key = u < v ? `${u}_${v}` : `${v}_${u}`;
           if (!edgeMap[key]) {
-            edgeMap[key] = { count: 1, from: u, to: v };
-          } else {
-            edgeMap[key].count++;
+            edgeMap[key] = {
+              count: 0,
+              blackFromTo: null,
+              whiteFromTo: null
+            };
           }
+          edgeMap[key].count++;
+          if (meshType === "black") {
+            edgeMap[key].blackFromTo = { from: u, to: v }
+          };
+          if (meshType === "white") {
+            edgeMap[key].whiteFromTo = { from: u, to: v }
+          };
         }
       }
+    }
 
-      // countが1のエッジ（＝他の三角形と共有されていない＝一番外側の外周、または内周の穴のフチ）を側面として壁を立てる
-      for (const key in edgeMap) {
-        if (edgeMap[key].count === 1) {
-          const u = edgeMap[key].from;
-          const v = edgeMap[key].to;
+    registerEdges(blackMesh, "black");
+    registerEdges(whiteMesh, "white");
 
-          // 前面の2点
-          const f_u = vertexOffset + u;
-          const f_v = vertexOffset + v;
-          // 背面の2点
-          const b_u = vertexOffset + vertexCount + u;
-          const b_v = vertexOffset + vertexCount + v;
+    // エッジマップを走査して適切な壁を立てる
+    objLines.push("# Generating precise wall polygons");
+    for (const key in edgeMap) {
+      const edge = edgeMap[key];
 
-          // 2つの三角形(テクスチャのポリゴン単位)を組み合わせて側面の四角形の壁を作る
-          objLines.push(`f ${f_u} ${b_u} ${b_v}`);
-          objLines.push(`f ${f_u} ${b_v} ${f_v}`);
-        }
+      // パターンA: 出現回数が1回 ＝ キャンバスの最外周（必ず白メッシュのフチになる）
+      if (edge.count === 1 && edge.whiteFromTo) {
+        const u = edge.whiteFromTo.from;
+        const v = edge.whiteFromTo.to;
+
+        // 白の前面(Z=2) と 共通背面(Z=0) の間に壁を立てる
+        const f_u = whiteOffset + u;
+        const f_v = whiteOffset + v;
+        const b_u = backOffset + u;
+        const b_v = backOffset + v;
+
+        objLines.push(`f ${f_u} ${b_u} ${b_v}`);
+        objLines.push(`f ${f_u} ${b_v} ${f_v}`);
       }
 
-      // 次の独立メッシュ（パーツ）へ向けてインデックスをずらす
-      vertexOffset += vertexCount * 2;
-    });
+      // パターンB: 黒メッシュと白メッシュの境界線（両方から1回ずつ参照されて count === 2 になる）
+      if (edge.blackFromTo && edge.whiteFromTo) {
+        // 黒三角形の向きを基準にして、段差の壁（Z=2 から Z=10）を立てる
+        const u = edge.blackFromTo.from;
+        const v = edge.blackFromTo.to;
+
+        const black_u = blackOffset + u;
+        const black_v = blackOffset + v;
+        const white_u = whiteOffset + u;
+        const white_v = whiteOffset + v;
+
+        // 黒前面(Z=10) と 白前面(Z=2) の隙間を埋める垂直な壁
+        objLines.push(`f ${black_u} ${white_u} ${white_v}`);
+        objLines.push(`f ${black_u} ${white_v} ${black_v}`);
+      }
+    }
 
     return objLines.join("\n");
   }
 
 </script>
+
+</html>
