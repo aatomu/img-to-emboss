@@ -81,8 +81,8 @@
     // 1. imgからcanvasに転写
     drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
     // 2. Render Canvas から直接 Marching Squares を実行（線形補間で滑らかに！）
-    const stepSize = 2; // 中間色を使うため、stepが2や3でもかなり綺麗に出ます
-    const meshData = generateSmoothMeshViaMarchingSquares(render_canvas, binarization_threshold, stepSize);
+    const stepSize = 3; // 中間色を使うため、stepが2や3でもかなり綺麗に出ます
+    const meshData = generateGreedyMarchingSquaresMesh(render_canvas, binarization_threshold, stepSize);
     console.log("Smooth Marching Squares メッシュデータ:", meshData);
 
     // 3. プレビューの描画
@@ -158,23 +158,23 @@
   /**
    * 中間色を使用した線形補間付き Marching Squares
    */
-  function generateSmoothMeshViaMarchingSquares(srcCanvas, threshold, step = 1) {
+  function generateGreedyMarchingSquaresMesh(srcCanvas, threshold, cellSize = 8) {
     const ctx = srcCanvas.getContext("2d");
     const width = srcCanvas.width;
     const height = srcCanvas.height;
     const imgData = ctx.getImageData(0, 0, width, height);
     const data = imgData.data;
 
-    // 指定座標のピクセルの「明るさ（0〜255）」を取得する関数
+    // 1. 指定座標のピクセルの明るさを取得
     function getVal(x, y) {
-      if (x < 0 || x >= width || y < 0 || y >= height) return 255; // 枠外は白（余白）
+      if (x < 0 || x >= width || y < 0 || y >= height) return 255;
       const idx = (y * width + x) * 4;
       // 透過ピクセルは白扱いにする
       if (data[idx + 3] === 0) return 255;
       return 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
     }
 
-    // 2点間の値から、閾値（128）を通る正確なサブピクセル位置の比率を計算（線形補間）
+    // 線形補間
     function lerpOffset(v1, v2) {
       if (v1 === v2) return 0.5;
       return (threshold - v1) / (v2 - v1);
@@ -201,9 +201,21 @@
       indices.push(addVertex(p1.x, p1.y), addVertex(p2.x, p2.y), addVertex(p3.x, p3.y));
     }
 
-    for (let y = 0; y < height - step; y += step) {
-      for (let x = 0; x < width - step; x += step) {
-        // 4隅の明るさを取得
+    // グリッドの次元を計算 (量子単位でループするため)
+    const step = quantumLevel;
+    const cols = Math.floor((width - 1) / step);
+    const rows = Math.floor((height - 1) / step);
+
+    // 3-A. 完全な四角形（パターン15）を管理する2次元グリッド配列
+    // 結合済みかどうかを追跡するため、booleanの2次元配列として初期化
+    const greedyGrid = Array.from({ length: rows }, () => new Array(cols).fill(false));
+
+    // --- フェーズ 1: Marching Squares の実行 & セル選別 ---
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = c * step;
+        const y = r * step;
+
         const vTL = getVal(x, y);
         const vTR = getVal(x + step, y);
         const vBL = getVal(x, y + step);
@@ -218,7 +230,13 @@
         const state = (tl << 3) | (tr << 2) | (br << 1) | bl;
         if (state === 0) continue;
 
-        // 線形補間により、エッジの中間点を正確に計算
+        // パターン15（完全な四角形）はGreedy用グリッドに登録
+        if (state === 15) {
+          greedyGrid[r][c] = true;
+          continue;
+        }
+
+        // 3-B. 斜め・三角形（パターン1〜14）：即座に三角形化して出力メッシュに登録
         const P_TL = { x: x, y: y };
         const P_TR = { x: x + step, y: y };
         const P_BR = { x: x + step, y: y + step };
@@ -245,10 +263,64 @@
           case 12: addTriangle(P_R, P_L, P_TL); addTriangle(P_R, P_TL, P_TR); break;
           case 13: addTriangle(P_R, P_B, P_BL); addTriangle(P_R, P_BL, P_TL); addTriangle(P_R, P_TL, P_TR); break;
           case 14: addTriangle(P_B, P_L, P_TL); addTriangle(P_B, P_TL, P_TR); addTriangle(P_B, P_TR, P_BR); break;
-          case 15: addTriangle(P_BL, P_TL, P_TR); addTriangle(P_BL, P_TR, P_BR); break;
         }
       }
     }
+
+    // --- フェーズ 2: 4. Greedy Meshing の実行 & 5. 三角形化してマージ ---
+    // 訪問済みを追跡するフラグ配列
+    const visited = Array.from({ length: rows }, () => new Array(cols).fill(false));
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        // パターン15であり、かつ未訪問のセルから貪欲法（Greedy）を開始
+        if (!greedyGrid[r][c] || visited[r][c]) continue;
+
+        // 幅(w)の拡張
+        let w = 1;
+        while (c + w < cols && greedyGrid[r][c + w] && !visited[r][c + w]) {
+          w++;
+        }
+
+        // 高さ(h)の拡張
+        let h = 1;
+        while (r + h < rows) {
+          let lineMatch = true;
+          for (let k = 0; k < w; k++) {
+            if (!greedyGrid[r + h][c + k] || visited[r + h][c + k]) {
+              lineMatch = false;
+              break;
+            }
+          }
+          if (!lineMatch) break;
+          h++;
+        }
+
+        // 拡張した矩形範囲を訪問済みにする
+        for (let dy = 0; dy < h; dy++) {
+          for (let dx = 0; dx < w; dx++) {
+            visited[r + dy][c + dx] = true;
+          }
+        }
+
+        // 結合された巨大な矩形の4隅の座標を計算
+        const x1 = c * step;
+        const y1 = r * step;
+        const x2 = (c + w) * step;
+        const y2 = (r + h) * step;
+
+        const G_TL = { x: x1, y: y1 };
+        const G_TR = { x: x2, y: y1 };
+        const G_BR = { x: x2, y: y2 };
+        const G_BL = { x: x1, y: y2 };
+
+        // 矩形を2つの三角形に分割して、共通の出力配列（vertices, indices）にマージ
+        addTriangle(G_BL, G_TL, G_TR);
+        addTriangle(G_BL, G_TR, G_BR);
+      }
+    }
+
+    // 最終的なメッシュデータを返す
     return { vertices, indices };
   }
 
