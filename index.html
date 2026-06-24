@@ -81,8 +81,8 @@
     // 1. imgからcanvasに転写
     drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
     // 2. Render Canvas から直接 Marching Squares を実行（線形補間で滑らかに！）
-    const stepSize = 3; // 中間色を使うため、stepが2や3でもかなり綺麗に出ます
-    const meshData = generateGreedyMarchingSquaresMesh(render_canvas, binarization_threshold, stepSize);
+    const cellSizeSize = 2; // 中間色を使うため、cellSizeが2や3でもかなり綺麗に出ます
+    const meshData = generateGreedyMarchingSquaresMesh(render_canvas, binarization_threshold, cellSizeSize);
     console.log("Smooth Marching Squares メッシュデータ:", meshData);
 
     // 3. プレビューの描画
@@ -201,10 +201,9 @@
       indices.push(addVertex(p1.x, p1.y), addVertex(p2.x, p2.y), addVertex(p3.x, p3.y));
     }
 
-    // グリッドの次元を計算 (量子単位でループするため)
-    const step = quantumLevel;
-    const cols = Math.floor((width - 1) / step);
-    const rows = Math.floor((height - 1) / step);
+    // グリッドの次元を計算
+    const cols = Math.floor((width - 1) / cellSize);
+    const rows = Math.floor((height - 1) / cellSize);
 
     // 3-A. 完全な四角形（パターン15）を管理する2次元グリッド配列
     // 結合済みかどうかを追跡するため、booleanの2次元配列として初期化
@@ -213,13 +212,13 @@
     // --- フェーズ 1: Marching Squares の実行 & セル選別 ---
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const x = c * step;
-        const y = r * step;
+        const x = c * cellSize;
+        const y = r * cellSize;
 
         const vTL = getVal(x, y);
-        const vTR = getVal(x + step, y);
-        const vBL = getVal(x, y + step);
-        const vBR = getVal(x + step, y + step);
+        const vTR = getVal(x + cellSize, y);
+        const vBL = getVal(x, y + cellSize);
+        const vBR = getVal(x + cellSize, y + cellSize);
 
         // 閾値より暗い（黒に近い）場合を「実体（Solid）」として1にする
         const tl = vTL < threshold ? 1 : 0;
@@ -238,14 +237,14 @@
 
         // 3-B. 斜め・三角形（パターン1〜14）：即座に三角形化して出力メッシュに登録
         const P_TL = { x: x, y: y };
-        const P_TR = { x: x + step, y: y };
-        const P_BR = { x: x + step, y: y + step };
-        const P_BL = { x: x, y: y + step };
+        const P_TR = { x: x + cellSize, y: y };
+        const P_BR = { x: x + cellSize, y: y + cellSize };
+        const P_BL = { x: x, y: y + cellSize };
 
-        const P_T = { x: x + step * lerpOffset(vTL, vTR), y: y };
-        const P_R = { x: x + step, y: y + step * lerpOffset(vTR, vBR) };
-        const P_B = { x: x + step * lerpOffset(vBL, vBR), y: y + step };
-        const P_L = { x: x, y: y + step * lerpOffset(vTL, vBL) };
+        const P_T = { x: x + cellSize * lerpOffset(vTL, vTR), y: y };
+        const P_R = { x: x + cellSize, y: y + cellSize * lerpOffset(vTR, vBR) };
+        const P_B = { x: x + cellSize * lerpOffset(vBL, vBR), y: y + cellSize };
+        const P_L = { x: x, y: y + cellSize * lerpOffset(vTL, vBL) };
 
         // パターンに応じた三角形分割
         switch (state) {
@@ -304,10 +303,10 @@
         }
 
         // 結合された巨大な矩形の4隅の座標を計算
-        const x1 = c * step;
-        const y1 = r * step;
-        const x2 = (c + w) * step;
-        const y2 = (r + h) * step;
+        const x1 = c * cellSize;
+        const y1 = r * cellSize;
+        const x2 = (c + w) * cellSize;
+        const y2 = (r + h) * cellSize;
 
         const G_TL = { x: x1, y: y1 };
         const G_TR = { x: x2, y: y1 };
