@@ -52,10 +52,6 @@
     <canvas id="render_canvas"></canvas>
   </div>
   <div class="box">
-    <span>Mesh Solid</span>
-    <canvas id="boundary_canvas"></canvas>
-  </div>
-  <div class="box">
     <span>Mesh Wireframe</span>
     <svg id="mesh_preview_svg"></svg>
   </div>
@@ -68,13 +64,10 @@
 
   const source = document.getElementById("source");
   const render_canvas = document.getElementById("render_canvas");
-  const boundary_canvas = document.getElementById("boundary_canvas");
   const mesh_preview_svg = document.getElementById("mesh_preview_svg");
 
   render_canvas.width = canvas_width;
   render_canvas.height = canvas_height;
-  boundary_canvas.width = canvas_width;
-  boundary_canvas.height = canvas_height;
   mesh_preview_svg.setAttribute("viewBox", `0 0 ${canvas_width} ${canvas_height}`);
 
   function processImage() {
@@ -86,7 +79,6 @@
     console.log("Smooth Marching Squares メッシュデータ:", meshData);
 
     // 3. プレビューの描画
-    drawMeshSolid(boundary_canvas, meshData);
     drawMeshSVG(mesh_preview_svg, meshData); // 極細のSVG線でプレビュー
 
     // 4. 3Dデータ(OBJ)として書き出し
@@ -321,22 +313,6 @@
 
     // 最終的なメッシュデータを返す
     return { vertices, indices };
-  }
-
-  function drawMeshSolid(canvas, mesh) {
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#FF7F50";
-
-    const { vertices, indices } = mesh;
-    for (let i = 0; i < indices.length; i += 3) {
-      ctx.beginPath();
-      ctx.moveTo(vertices[indices[i] * 2], vertices[indices[i] * 2 + 1]);
-      ctx.lineTo(vertices[indices[i + 1] * 2], vertices[indices[i + 1] * 2 + 1]);
-      ctx.lineTo(vertices[indices[i + 2] * 2], vertices[indices[i + 2] * 2 + 1]);
-      ctx.closePath();
-      ctx.fill();
-    }
   }
 
   /**
