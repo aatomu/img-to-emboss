@@ -57,7 +57,30 @@
     <span>Mesh Wireframe Preview</span>
     <svg id="mesh_preview_svg"></svg>
   </div>
-
+  <div class="box">
+    <span>Config</span>
+    <div>
+      <span>Image quarity</span>
+      <select>
+        <option>360p(Light/Law Quarity)</option>
+        <option>480p/SD</option>
+        <option>720p/HD</option>
+        <option>1080p/FHD(Heavey/High Quarity)</option>
+      </select>
+      <span>Noise threshold</span>
+      <input type=number step=1>
+      <span>Minimum cell size</span>
+      <input type=number step=1>
+      <span>Model base height(mm)</span>
+      <input type=number step=0.1>
+      <span>Model bump height(mm)</span>
+      <input type=number step=0.1>
+      <span>Export height(mm)</span>
+      <input type=number step=1>
+      <span>Export width(mm)</span>
+      <input type=number step=1>
+    </div>
+  </div>
   <script>
     const canvas_width = 360;
     const canvas_height = 640;
@@ -74,9 +97,6 @@
       console.log("--- 全ピクセル走査二分木 開始 ---");
       drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
 
-      // 許容エラー値としきい値
-      // 全ピクセルを走査するため、わずかなノイズも拾います。
-      // 線画のエッジをパキッとさせたい場合は 10〜20 あたりで微調整してください。
       const errorThreshold = 15;
       const minCellSize = 4;
 
@@ -85,9 +105,9 @@
 
       drawMeshSVG(mesh_preview_svg, meshData);
 
-      const baseHeight = 2.0;   // 土台の厚み (mm)
-      const maxHeight = 8.0;    // 凸部の最大高さ (mm)
-      const objText = exportToSolidOBJ(meshData, baseHeight, maxHeight);
+      const baseHeight = 20.0;   // 土台の厚み (mm) -> 白(0xFF)のとき、この高さになる
+      const bumpHeight = 5.0;   // 凸部の純粋な高さ最大値 (mm) -> 黒(0x00)のとき、baseHeight + bumpHeight になる
+      const objText = exportToSolidOBJ(meshData, baseHeight, bumpHeight);
 
       download("character_emboss_full_scan.obj", new Blob([objText], { type: "text/plain" }));
     }
@@ -138,6 +158,7 @@
 
       function getOrAddVertex(x, y) {
         const sampleValue = getSample(x, y);
+        // 黒(0)で1.0、白(255)で0.0
         const heightValue = (255 - sampleValue) / 255.0;
 
         const key = `${x.toFixed(1)},${y.toFixed(1)}`;
@@ -150,7 +171,7 @@
         return vIdx;
       }
 
-      // ★修正: 領域内の全ピクセルを「1マスずつ漏れなく」完全走査する
+      // 領域内のピクセルを全走査する
       function checkError(x, y, w, h) {
         let minV = 255;
         let maxV = 0;
@@ -211,9 +232,8 @@
         }
       }
 
-      // キャンバスの実寸(0, 0, 360, 640)からスタート
       binaryTree(0, 0, W, H);
-      console.log(`二分木走査完了。全ピクセルチェックによる処理セル数: ${callCount}`);
+      console.log(`二分木走査完了。処理セル数: ${callCount}`);
 
       return { vertices, indices, width: W, height: H };
     }
@@ -243,70 +263,127 @@
       svg.appendChild(fragment);
     }
 
-    function exportToSolidOBJ(meshData, baseHeight, maxHeight) {
+    function exportToSolidOBJ(meshData, baseHeight, bumpHeight) {
       let objLines = [];
-      objLines.push("# Exported Solid Binary Tree Emboss Block Mesh");
+      objLines.push("# Exported Solid Binary Tree Emboss Block Mesh with Clean Walls");
 
-      const vCount = meshData.vertices.length;
+      const vertices = meshData.vertices;
+      const indices = meshData.indices;
+      const W = meshData.width;
       const H = meshData.height;
 
-      // 1. 表面
-      for (const v of meshData.vertices) {
-        const z = baseHeight + (maxHeight * v.h);
+      // ==========================================
+      // 1. 表面 vertex作成
+      // ==========================================
+      objLines.push("# 1. Top Surface Vertices");
+      for (const v of vertices) {
+        const z = baseHeight + (bumpHeight * v.h);
         objLines.push(`v ${v.x.toFixed(4)} ${(H - v.y).toFixed(4)} ${z.toFixed(4)}`);
       }
 
-      // 2. 裏面 (Z = 0.0 固定のソリッドベース)
-      for (const v of meshData.vertices) {
-        objLines.push(`v ${v.x.toFixed(4)} ${(H - v.y).toFixed(4)} 0.0000`);
+      // ==========================================
+      // 2. 外周の各辺（軸ごと）の頂点を抽出・ソート
+      // ==========================================
+      const eps = 0.1;
+
+      // 表面の頂点インデックス(1-based)と座標を各軸（辺）ごとに格納
+      let topEdgeTop = []; // 上辺 (Y = 0)
+      let topEdgeBottom = []; // 下辺 (Y = H)
+      let topEdgeLeft = []; // 左辺 (X = 0)
+      let topEdgeRight = []; // 右辺 (X = W)
+
+      for (let i = 0; i < vertices.length; i++) {
+        const v = vertices[i];
+        const idx = i + 1; // OBJの1-based index
+
+        if (Math.abs(v.y - 0) < eps) topEdgeTop.push({ idx, x: v.x, y: v.y });
+        else if (Math.abs(v.y - H) < eps) topEdgeBottom.push({ idx, x: v.x, y: v.y });
+
+        if (Math.abs(v.x - 0) < eps) topEdgeLeft.push({ idx, x: v.x, y: v.y });
+        else if (Math.abs(v.x - W) < eps) topEdgeRight.push({ idx, x: v.x, y: v.y });
       }
 
-      objLines.push("");
+      // 端から順番に並ぶようにソート
+      topEdgeTop.sort((a, b) => a.x - b.x);       // 左(0)から右(W)へ
+      topEdgeBottom.sort((a, b) => a.x - b.x);    // 左(0)から右(W)へ
+      topEdgeLeft.sort((a, b) => a.y - b.y);      // 上(0)から下(H)へ
+      topEdgeRight.sort((a, b) => a.y - b.y);     // 上(0)から下(H)へ
 
-      // 3. 表面インデックス
-      objLines.push("# Top Surface");
-      for (let i = 0; i < meshData.indices.length; i += 3) {
-        objLines.push(`f ${meshData.indices[i] + 1} ${meshData.indices[i + 1] + 1} ${meshData.indices[i + 2] + 1}`);
+      // ==========================================
+      // 3. 表面 face 出力
+      // ==========================================
+      objLines.push("\n# 3. Top Surface Faces");
+      for (let i = 0; i < indices.length; i += 3) {
+        objLines.push(`f ${indices[i] + 1} ${indices[i + 1] + 1} ${indices[i + 2] + 1}`);
       }
 
-      // 4. 裏面インデックス (面を反転)
-      objLines.push("# Bottom Flat Surface");
-      for (let i = 0; i < meshData.indices.length; i += 3) {
-        const i0 = meshData.indices[i] + 1 + vCount;
-        const i1 = meshData.indices[i + 1] + 1 + vCount;
-        const i2 = meshData.indices[i + 2] + 1 + vCount;
-        objLines.push(`f ${i0} ${i2} ${i1}`);
-      }
+      // ==========================================
+      // 4. 裏面 vertex を作成 (H=0 固定)
+      // 外周の並び順を維持したまま、全く同じX, YでZ=0の頂点を作る
+      // ==========================================
+      objLines.push("\n# 4. Bottom Surface Vertices (Z=0)");
 
-      // 5. 側面の壁の縫い合わせ
-      objLines.push("# Side Walls");
-      const edgeMap = new Map();
-      for (let i = 0; i < meshData.indices.length; i += 3) {
-        const tIdx = [meshData.indices[i], meshData.indices[i + 1], meshData.indices[i + 2]];
-        const pairs = [[tIdx[0], tIdx[1]], [tIdx[1], tIdx[2]], [tIdx[2], tIdx[0]]];
-        for (const p of pairs) {
-          const key = p[0] < p[1] ? `${p[0]}_${p[1]}` : `${p[1]}_${p[0]}`;
-          edgeMap.set(key, (edgeMap.get(key) || 0) + 1);
+      let topVertexCount = vertices.length;
+      let currentBotIdx = topVertexCount + 1;
+
+      // 裏面頂点のインデックスを紐付ける関数
+      function createBottomVertices(edgeArray) {
+        for (let item of edgeArray) {
+          objLines.push(`v ${item.x.toFixed(4)} ${(H - item.y).toFixed(4)} 0.0000`);
+          item.botIdx = currentBotIdx;
+          currentBotIdx++;
         }
       }
 
-      for (let i = 0; i < meshData.indices.length; i += 3) {
-        const tIdx = [meshData.indices[i], meshData.indices[i + 1], meshData.indices[i + 2]];
-        const pairs = [[tIdx[0], tIdx[1]], [tIdx[1], tIdx[2]], [tIdx[2], tIdx[0]]];
+      createBottomVertices(topEdgeTop);
+      createBottomVertices(topEdgeBottom);
+      createBottomVertices(topEdgeLeft);
+      createBottomVertices(topEdgeRight);
 
-        for (const p of pairs) {
-          const key = p[0] < p[1] ? `${p[0]}_${p[1]}` : `${p[1]}_${p[0]}`;
-          if (edgeMap.get(key) === 1) {
-            const topA = p[0] + 1;
-            const topB = p[1] + 1;
-            const botA = p[0] + 1 + vCount;
-            const botB = p[1] + 1 + vCount;
+      // ==========================================
+      // 6. 上下左右の表裏をつなげるface（先に壁を張ります）
+      // ==========================================
+      objLines.push("\n# 6. Side Wall Faces");
 
-            objLines.push(`f ${topA} ${botA} ${topB}`);
-            objLines.push(`f ${topB} ${botA} ${botB}`);
+      // 各辺の隣り合う2点から、ねじれのない四角形（三角形2枚）を生成する共通関数
+      // flipの真偽値で法線が外を向くように調整
+      function buildWall(edgeArray, flip) {
+        for (let i = 0; i < edgeArray.length - 1; i++) {
+          const tA = edgeArray[i].idx;
+          const tB = edgeArray[i + 1].idx;
+          const bA = edgeArray[i].botIdx;
+          const bB = edgeArray[i + 1].botIdx;
+
+          if (flip) {
+            objLines.push(`f ${tA} ${bB} ${tB}`);
+            objLines.push(`f ${tA} ${bA} ${bB}`);
+          } else {
+            objLines.push(`f ${tA} ${tB} ${bB}`);
+            objLines.push(`f ${tA} ${bB} ${bA}`);
           }
         }
       }
+
+      // 各壁の向き（時計回り・反時計回り）に合わせて法線方向を外側へ向ける
+      buildWall(topEdgeTop, true);  // 上壁
+      buildWall(topEdgeBottom, false); // 下壁
+      buildWall(topEdgeLeft, false); // 左壁
+      buildWall(topEdgeRight, true);  // 右壁
+
+      // ==========================================
+      // 5. 裏面 face（四隅の対応関係を維持してシンプルに2枚で閉じる）
+      // ==========================================
+      objLines.push("\n# 5. Bottom Flat Faces");
+
+      // 各辺の端（角）にあたる裏面頂点インデックスを取得
+      const bCorner_TL = topEdgeTop[0].botIdx;
+      const bCorner_TR = topEdgeTop[topEdgeTop.length - 1].botIdx;
+      const bCorner_BL = topEdgeBottom[0].botIdx;
+      const bCorner_BR = topEdgeBottom[topEdgeBottom.length - 1].botIdx;
+
+      // 裏面から見て時計回り（法線が真下 Z- を向く）
+      objLines.push(`f ${bCorner_TL} ${bCorner_TR} ${bCorner_BR}`);
+      objLines.push(`f ${bCorner_TL} ${bCorner_BR} ${bCorner_BL}`);
 
       return objLines.join("\n");
     }
