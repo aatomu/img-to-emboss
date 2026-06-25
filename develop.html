@@ -41,7 +41,6 @@
       background-color: white;
     }
 
-    /* 縦横比はJS側で動的に制御するため、CSSからは固定比率を削除 */
     .portrait {
       aspect-ratio: 9/16;
     }
@@ -75,6 +74,9 @@
 
     .config-row label {
       font-size: 0.9rem;
+      display: flex;
+      align-items: center;
+      gap: 4px;
     }
 
     button {
@@ -102,11 +104,27 @@
     <span>Config</span>
     <div class="config-container">
       <div class="config-item">
-        <span>Orientation (縦横方向)</span>
-        <div class="config-row">
-          <label><input type="radio" name="config-orientation" value="portrait" checked> 縦向き (9:16)</label>
-          <label><input type="radio" name="config-orientation" value="landscape"> 横向き (16:9)</label>
-        </div>
+        <span>Orientation / 縦横方向</span>
+        <select id="config-orientation">
+          <option value="portrait">Portrait / 縦向き (9:16)</option>
+          <option value="landscape">Landscape / 横向き (16:9)</option>
+        </select>
+      </div>
+
+      <div class="config-item">
+        <span>Flip Horizontal / 左右反転</span>
+        <label>
+          <input type="checkbox" id="config-flip-h">
+          <span>Enable</span>
+        </label>
+      </div>
+
+      <div class="config-item">
+        <span>Flip Vertical / 上下反転</span>
+        <label>
+          <input type="checkbox" id="config-flip-v">
+          <span>Enable</span>
+        </label>
       </div>
 
       <div class="config-item">
@@ -165,7 +183,7 @@
         <span>Export width / ベースの幅 (mm)</span>
         <input type="number" id="config-exp_w" min="1" step="1" value="90">
       </div>
-      <button id="button_render">Render Image</button>
+      <button id="button_render">Render Mesh</button>
       <button id="button_export">Export OBJ</button>
     </div>
   </div>
@@ -185,6 +203,9 @@
     let calculatedMeshData = null;
 
     // 入力要素の取得
+    const configOrientation = document.getElementById("config-orientation");
+    const configFlipH = document.getElementById("config-flip-h");
+    const configFlipV = document.getElementById("config-flip-v");
     const configQuality = document.getElementById("config-quality");
     const configScale = document.getElementById("config-scale");
     const configAlignH = document.getElementById("config-align-h");
@@ -195,15 +216,6 @@
     const configBumpH = document.getElementById("config-bump_h");
     const buttonRender = document.getElementById("button_render");
     const buttonExport = document.getElementById("button_export");
-    const configOrientations = document.getElementsByName("config-orientation");
-
-    // 選択されている縦横方向を取得
-    function getOrientation() {
-      for (const radio of configOrientations) {
-        if (radio.checked) return radio.value;
-      }
-      return "portrait";
-    }
 
     // 画面のクラスとアスペクト比を同期
     function updateStyleClasses(orientation) {
@@ -219,8 +231,16 @@
       });
     }
 
-    function updateCanvasSize() {
-      const orientation = getOrientation();
+
+    [configOrientation, configFlipH, configFlipV, configQuality, configScale, configAlignH, configAlignV,].forEach(input => {
+      input.addEventListener("change", () => {
+        renderImage();
+      })
+    });
+
+    function renderImage() {
+      console.log("--- キャンバス処理 ---");
+      const orientation = configOrientation.value;
       updateStyleClasses(orientation);
 
       const baseQ = baseQualityMap[configQuality.value] || { w: 360, h: 640 };
@@ -236,31 +256,23 @@
       render_canvas.width = w;
       render_canvas.height = h;
       mesh_preview_svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+
+    // UIからスケールとアライメント設定を取得
+    const imgScale = parseFloat(configScale.value) || 0.5;
+    const hAlign = configAlignH.value;
+    const vAlign = configAlignV.value;
+    const flipH = configFlipH.checked;
+    const flipV = configFlipV.checked;
+
+    // 画像描画 (サイズ、位置、反転のフラグを渡す)
+    drawImageWithScaleAndAlignment(source, render_canvas, imgScale, imgScale, hAlign, vAlign, flipH, flipV);
     }
 
-    // ラジオボタン切り替え時に見た目・解像度を即時プレビュー反映用
-    configOrientations.forEach(radio => {
-      radio.addEventListener("change", updateCanvasSize);
-    });
-    configQuality.addEventListener("change", updateCanvasSize);
-
     buttonRender.addEventListener("click", () => {
-      processImage();
+      renderMesh();
     });
 
-    function processImage() {
-      console.log("--- 全ピクセル走査二分木 開始 ---");
-
-      updateCanvasSize();
-
-      // UIからスケールとアライメント設定を取得
-      const imgScale = parseFloat(configScale.value) || 0.5;
-      const hAlign = configAlignH.value;
-      const vAlign = configAlignV.value;
-
-      // 画像描画 (サイズ倍率とアライメントを渡す)
-      drawImageWithScaleAndAlignment(source, render_canvas, imgScale, imgScale, hAlign, vAlign);
-
+    function renderMesh() {
       // inputから動的に数値を読み込み (型変換を行う)
       const errorThreshold = parseFloat(configThreshold.value) || 15;
       const minCellSize = parseInt(configMinCell.value) || 4;
@@ -287,7 +299,7 @@
       download("character_emboss_full_scan.obj", new Blob([objText], { type: "text/plain" }));
     });
 
-    function drawImageWithScaleAndAlignment(img, canvas, wScale = 1.0, hScale = 1.0, hAlign = "center", vAlign = "middle") {
+    function drawImageWithScaleAndAlignment(img, canvas, wScale = 1.0, hScale = 1.0, hAlign = "center", vAlign = "middle", flipH = false, flipV = false) {
       const ctx = canvas.getContext("2d");
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -304,7 +316,7 @@
       } else if (hAlign === "right") {
         x = canvasW - scaledW;
       } else {
-        x = (canvasW - scaledW) / 2; // center
+        x = (canvasW - scaledW) / 2;
       }
 
       // 縦位置 (Vertical Alignment) の計算
@@ -314,11 +326,23 @@
       } else if (vAlign === "bottom") {
         y = canvasH - scaledH;
       } else {
-        y = (canvasH - scaledH) / 2; // middle
+        y = (canvasH - scaledH) / 2;
       }
+
+      ctx.save();
+
+      // 反転処理のロジックを追加
+      // Canvasの中心ではなく、描画する画像の「中心」を軸に反転をかけることで位置ずれを防ぎます
+      const centerX = x + scaledW / 2;
+      const centerY = y + scaledH / 2;
+      ctx.translate(centerX, centerY);
+      ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+      ctx.translate(-centerX, -centerY);
 
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(img, x, y, scaledW, scaledH);
+
+      ctx.restore(); // 座標系を元に戻す
 
       const imgData = ctx.getImageData(0, 0, canvasW, canvasH);
       const data = imgData.data;
@@ -583,6 +607,8 @@
       link.download = name;
       link.click();
     }
+
+    renderImage()
   </script>
 </body>
 
