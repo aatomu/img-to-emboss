@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Image to Emboss (Smooth Marching Squares)</title>
+  <style>
+    body {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      justify-content: space-around;
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+      background-color: #f5f5f5;
+      font-family: sans-serif;
+    }
+
+    .box {
+      display: flex;
+      flex-direction: column;
+      flex-wrap: nowrap;
+      justify-content: center;
+      align-items: center;
+      margin: 20px;
+    }
+
+    .box span {
+      font-weight: bold;
+      text-decoration: underline;
+      margin-bottom: 5px;
+    }
+
+    .box img,
+    .box canvas,
+    .box svg {
+      aspect-ratio: 9/16;
+      width: 450px;
+      image-rendering: pixelated;
+      border: 2px solid black;
+      background-color: white;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="box">
+    <span>Source</span>
+    <img id="source" src="./yuruyuru_atomu.svg" alt="Source Image">
+  </div>
+  <div class="box">
+    <span>Render Canvas</span>
+    <canvas id="render_canvas"></canvas>
+  </div>
+  <div class="box">
+    <span>Mesh Wireframe (Dual Color Preview)</span>
+    <svg id="mesh_preview_svg"></svg>
+  </div>
+
+  <script>
+    const canvas_width = 360;
+    const canvas_height = 640;
+    const binarization_threshold = 128;
+
+    const source = document.getElementById("source");
+    const render_canvas = document.getElementById("render_canvas");
+    const mesh_preview_svg = document.getElementById("mesh_preview_svg");
+
+    render_canvas.width = canvas_width;
+    render_canvas.height = canvas_height;
+    mesh_preview_svg.setAttribute("viewBox", `0 0 ${canvas_width} ${canvas_height}`);
+
+    function processImage() {
+      // 1. imgからcanvasに転写
+      drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
+      // 2. 4分木によるメッシュ生成
+      const errorThresHold = 2;
+      const meshData = QuadtreeMesh(render_canvas, binarization_threshold, cellSizeSize);
+      console.log("Smooth Marching Squares メッシュデータ:", meshData);
+
+      // 3. プレビューの描画 (黒面＝濃いグレー、白面＝薄いグレーで視覚化)
+      drawMeshSVG(mesh_preview_svg, meshData);
+
+      // 4. 3Dデータ(OBJ)として書き出し
+      const blackMesh = { vertices: meshData.vertices, indices: meshData.blackIndices, name: "black" };
+      const whiteMesh = { vertices: meshData.vertices, indices: meshData.whiteIndices, name: "white" };
+
+      // 厚みの設定：共通背面は Z=0。白（土台ベース）は 2.0mm、黒（浮き出るキャラ）は 10.0mm
+      const thicknessSettings = {
+        black: 10.0,
+        white: 2.0
+      };
+
+      const objText = exportToOBJ([blackMesh, whiteMesh], thicknessSettings);
+
+      // ダウンロード処理
+      download("exported_object_YYYYMMDD.obj",new Blob([objText], { type: "text/plain" }))
+    }
+
+    source.onload = function () {
+      processImage();
+    };
+
+    if (source.complete) {
+      processImage();
+    }
+
+    function drawImageWithScaleAndAlignment(img, canvas, wScale = 1.0, hScale = 1.0, hAlign = "center", vAlign = "middle") {
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const scaledW = img.naturalWidth * wScale;
+      const scaledH = img.naturalHeight * hScale;
+      const canvasW = canvas.width;
+      const canvasH = canvas.height;
+
+      let x = 0;
+      if (hAlign === "left") x = 0;
+      else if (hAlign === "center") x = (canvasW - scaledW) / 2;
+      else if (hAlign === "right") x = canvasW - scaledW;
+
+      let y = 0;
+      if (vAlign === "top") y = 0;
+      else if (vAlign === "middle") y = (canvasH - scaledH) / 2;
+      else if (vAlign === "bottom") y = canvasH - scaledH;
+
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, x, y, scaledW, scaledH);
+    }
+
+    function download(name, blob) {
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "character_emboss_smooth.obj";
+      link.click();
+    }
+  </script>
+
+</html>
