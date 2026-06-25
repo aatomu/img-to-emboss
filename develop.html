@@ -201,6 +201,15 @@
         <span>Model bump height / 凸凹の高さ (mm)</span>
         <input type="number" id="config-bump_h" min="1" step="0.1" value="5.0">
       </div>
+
+      <div class="config-item">
+        <span>Reverse / 凹で生成</span>
+        <label>
+          <input type="checkbox" id="config-reverse">
+          <span>Enable</span>
+        </label>
+      </div>
+
       <button id="button_render">Render Mesh</button>
       <button id="button_export">Export OBJ</button>
     </div>
@@ -233,6 +242,7 @@
     const configMinCell = document.getElementById("config-min_cell");
     const configBaseH = document.getElementById("config-base_h");
     const configBumpH = document.getElementById("config-bump_h");
+    const configReverse = document.getElementById("config-reverse");
     const buttonRender = document.getElementById("button_render");
     const buttonExport = document.getElementById("button_export");
 
@@ -265,7 +275,7 @@
     })
 
     window.addEventListener("DOMContentLoaded", () => {
-      [configOrientation, configFlipH, configFlipV, configQuality, configScale, configAlignH, configAlignV].forEach(input => {
+      [configOrientation, configFlipH, configFlipV, configQuality, configScale, configAlignH, configAlignV, configReverse].forEach(input => {
         input.addEventListener("change", () => {
           renderImage();
         })
@@ -380,10 +390,21 @@
       ctx.restore(); // 座標系を元に戻す
 
       const imgData = ctx.getImageData(0, 0, canvasW, canvasH);
+      const isReverse = configReverse.checked === true
+
       const data = imgData.data;
       for (let i = 0; i < data.length; i += 4) {
         const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-        data[i] = gray; data[i + 1] = gray; data[i + 2] = gray;
+        if (!isReverse) {
+          data[i] = gray;
+          data[i + 1] = gray;
+          data[i + 2] = gray;
+        } else {
+          data[i] = 255 - gray;
+          data[i + 1] = 255 - gray;
+          data[i + 2] = 255 - gray;
+
+        }
       }
       ctx.putImageData(imgData, 0, 0);
     }
