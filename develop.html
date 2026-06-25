@@ -36,10 +36,34 @@
     .box canvas,
     .box svg {
       aspect-ratio: 9/16;
-      width: 450px;
+      width: calc(90vw / 4);
       image-rendering: pixelated;
       border: 2px solid black;
       background-color: white;
+    }
+
+    /* 設定周りのレイアウトを少し整えるスタイルを追加 */
+    .config-container {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      width: 300px;
+    }
+
+    .config-item {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .config-item span {
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+
+    button {
+      margin-top: 15px;
+      padding: 8px;
+      cursor: pointer;
     }
   </style>
 </head>
@@ -59,61 +83,114 @@
   </div>
   <div class="box">
     <span>Config</span>
-    <div>
-      <span>Image quarity</span>
-      <select>
-        <option>360p(Light/Law Quarity)</option>
-        <option>480p/SD</option>
-        <option>720p/HD</option>
-        <option>1080p/FHD(Heavey/High Quarity)</option>
-      </select>
-      <span>Noise threshold</span>
-      <input type=number step=1>
-      <span>Minimum cell size</span>
-      <input type=number step=1>
-      <span>Model base height(mm)</span>
-      <input type=number step=0.1>
-      <span>Model bump height(mm)</span>
-      <input type=number step=0.1>
-      <span>Export height(mm)</span>
-      <input type=number step=1>
-      <span>Export width(mm)</span>
-      <input type=number step=1>
+    <div class="config-container">
+      <div class="config-item">
+        <span>Image quality</span>
+        <select id="config-quality">
+          <option value="360">360p(Light/Low Quality)</option>
+          <option value="480">480p/SD</option>
+          <option value="720">720p/HD</option>
+          <option value="1080">1080p/FHD(Heavy/High Quality)</option>
+        </select>
+      </div>
+      <div class="config-item">
+        <span>Noise threshold</span>
+        <input type="number" id="config-threshold" min="1" step="1" value="15">
+      </div>
+      <div class="config-item">
+        <span>Minimum cell size</span>
+        <input type="number" id="config-min_cell" min="1" step="1" value="4">
+      </div>
+      <div class="config-item">
+        <span>Model base height(mm)</span>
+        <input type="number" id="config-base_h" min="1" step="0.1" value="20.0">
+      </div>
+      <div class="config-item">
+        <span>Model bump height(mm)</span>
+        <input type="number" id="config-bump_h" min="1" step="0.1" value="5.0">
+      </div>
+      <div class="config-item">
+        <span>Export height(mm)</span>
+        <input type="number" id="config-exp_h" min="1" step="1" value="160">
+      </div>
+      <div class="config-item">
+        <span>Export width(mm)</span>
+        <input type="number" id="config-exp_w" min="1" step="1" value="90">
+      </div>
+      <button id="button_render">Render Image</button>
+      <button id="button_export">Export OBJ</button>
     </div>
   </div>
   <script>
-    const canvas_width = 360;
-    const canvas_height = 640;
+    // 解像度マッピング (9:16を維持)
+    const qualityMap = {
+      "360": { w: 360, h: 640 },
+      "480": { w: 480, h: 854 },
+      "720": { w: 720, h: 1280 },
+      "1080": { w: 1080, h: 1920 }
+    };
 
     const source = document.getElementById("source");
     const render_canvas = document.getElementById("render_canvas");
     const mesh_preview_svg = document.getElementById("mesh_preview_svg");
 
-    render_canvas.width = canvas_width;
-    render_canvas.height = canvas_height;
-    mesh_preview_svg.setAttribute("viewBox", `0 0 ${canvas_width} ${canvas_height}`);
+    // 保存用グローバル変数
+    let calculatedMeshData = null;
+
+    // 入力要素の取得
+    const configQuality = document.getElementById("config-quality");
+    const configThreshold = document.getElementById("config-threshold");
+    const configMinCell = document.getElementById("config-min_cell");
+    const configBaseH = document.getElementById("config-base_h");
+    const configBumpH = document.getElementById("config-bump_h");
+    const buttonRender = document.getElementById("button_render");
+    const buttonExport = document.getElementById("button_export");
+
+    function updateCanvasSize() {
+      const q = qualityMap[configQuality.value] || { w: 360, h: 640 };
+      render_canvas.width = q.w;
+      render_canvas.height = q.h;
+      mesh_preview_svg.setAttribute("viewBox", `0 0 ${q.w} ${q.h}`);
+    }
+
+    buttonRender.addEventListener("click", () => {
+      processImage()
+    })
 
     function processImage() {
       console.log("--- 全ピクセル走査二分木 開始 ---");
+
+      // 設定に合わせてキャンバスサイズを動的変更
+      updateCanvasSize();
+
+      // 画像描画
       drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
 
-      const errorThreshold = 15;
-      const minCellSize = 4;
+      // inputから動的に数値を読み込み (型変換を行う)
+      const errorThreshold = parseFloat(configThreshold.value) || 15;
+      const minCellSize = parseInt(configMinCell.value) || 4;
 
-      const meshData = heightmapToBinaryTreeMesh(render_canvas, errorThreshold, minCellSize);
-      console.log("最終メッシュデータ:", meshData);
+      // メッシュ生成
+      calculatedMeshData = heightmapToBinaryTreeMesh(render_canvas, errorThreshold, minCellSize);
+      console.log("最終メッシュデータ:", calculatedMeshData);
 
-      drawMeshSVG(mesh_preview_svg, meshData);
-
-      const baseHeight = 20.0;   // 土台の厚み (mm) -> 白(0xFF)のとき、この高さになる
-      const bumpHeight = 5.0;   // 凸部の純粋な高さ最大値 (mm) -> 黒(0x00)のとき、baseHeight + bumpHeight になる
-      const objText = exportToSolidOBJ(meshData, baseHeight, bumpHeight);
-
-      download("character_emboss_full_scan.obj", new Blob([objText], { type: "text/plain" }));
+      // SVGプレビュー更新
+      drawMeshSVG(mesh_preview_svg, calculatedMeshData);
     }
 
-    source.onload = function () { processImage(); };
-    if (source.complete) { processImage(); }
+    // エクスポートボタンが押されたときにOBJをダウンロードする
+    buttonExport.addEventListener("click", () => {
+      if (!calculatedMeshData) {
+        alert("画像が処理されていません。");
+        return;
+      }
+      const baseHeight = parseFloat(configBaseH.value) || 20.0;
+      const bumpHeight = parseFloat(configBumpH.value) || 5.0;
+
+      const objText = exportToSolidOBJ(calculatedMeshData, baseHeight, bumpHeight);
+
+      download("character_emboss_full_scan.obj", new Blob([objText], { type: "text/plain" }));
+    });
 
     function drawImageWithScaleAndAlignment(img, canvas, wScale = 1.0, hScale = 1.0, hAlign = "center", vAlign = "middle") {
       const ctx = canvas.getContext("2d");
@@ -294,7 +371,7 @@
 
       for (let i = 0; i < vertices.length; i++) {
         const v = vertices[i];
-        const idx = i + 1; // OBJの1-based index
+        const idx = i + 1;
 
         if (Math.abs(v.y - 0) < eps) topEdgeTop.push({ idx, x: v.x, y: v.y });
         else if (Math.abs(v.y - H) < eps) topEdgeBottom.push({ idx, x: v.x, y: v.y });
