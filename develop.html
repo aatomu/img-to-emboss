@@ -66,6 +66,26 @@
       font-size: 0.9rem;
     }
 
+    .input-file {
+      position: relative;
+      height: 1lh;
+
+      border-radius: 5px;
+      border-width: 2px;
+      border-style: solid;
+    }
+
+    .input-file * {
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      margin: auto;
+
+      text-align: center;
+    }
+
     .config-row {
       display: flex;
       flex-direction: row;
@@ -104,6 +124,12 @@
     <span>Config</span>
     <div class="config-container">
       <div class="config-item">
+        <div class="input-file">
+          <div>Upload image(D&D or Click)</div>
+          <input type="file" style="opacity: 0;" id="input-image">
+        </div>
+      </div>
+      <div class="config-item">
         <span>Orientation / 縦横方向</span>
         <select id="config-orientation">
           <option value="portrait">Portrait / 縦向き (9:16)</option>
@@ -112,7 +138,7 @@
       </div>
 
       <div class="config-item">
-        <span>Flip Horizontal / 左右反転</span>
+        <span>Flip horizontal / 左右反転</span>
         <label>
           <input type="checkbox" id="config-flip-h">
           <span>Enable</span>
@@ -120,7 +146,7 @@
       </div>
 
       <div class="config-item">
-        <span>Flip Vertical / 上下反転</span>
+        <span>Flip vertical / 上下反転</span>
         <label>
           <input type="checkbox" id="config-flip-v">
           <span>Enable</span>
@@ -138,12 +164,12 @@
       </div>
 
       <div class="config-item">
-        <span>Image Scale / 描画サイズ倍率</span>
+        <span>Image scale / 描画サイズ倍率</span>
         <input type="number" id="config-scale" min="0.1" max="10.0" step="0.1" value="0.5">
       </div>
 
       <div class="config-item">
-        <span>Horizontal Alignment / 横位置</span>
+        <span>Horizontal alignment / 横位置</span>
         <select id="config-align-h">
           <option value="left">Left</option>
           <option value="center" selected>Center</option>
@@ -169,7 +195,7 @@
       </div>
       <div class="config-item">
         <span>Model base height / ベースの厚さ (mm)</span>
-        <input type="number" id="config-base_h" min="1" step="0.1" value="20.0">
+        <input type="number" id="config-base_h" min="1" step="0.1" value="5.0">
       </div>
       <div class="config-item">
         <span>Model bump height / 凸凹の高さ (mm)</span>
@@ -195,6 +221,7 @@
     let calculatedMeshData = null;
 
     // 入力要素の取得
+    const inputImage = document.getElementById("input-image");
     const configOrientation = document.getElementById("config-orientation");
     const configFlipH = document.getElementById("config-flip-h");
     const configFlipV = document.getElementById("config-flip-v");
@@ -208,6 +235,16 @@
     const configBumpH = document.getElementById("config-bump_h");
     const buttonRender = document.getElementById("button_render");
     const buttonExport = document.getElementById("button_export");
+
+    inputImage.addEventListener('change', (event) => {
+      // 選択されたファイルを取得
+      const file = event.target.files[0];
+
+      // ファイルが画像であることを確認
+      if (file && file.type.startsWith('image/')) {
+        source.src = URL.createObjectURL(file);
+      }
+    });
 
     // 画面のクラスとアスペクト比を同期
     function updateStyleClasses(orientation) {
@@ -223,15 +260,20 @@
       });
     }
 
+    source.addEventListener("load", () => {
+      renderImage()
+    })
 
-    [configOrientation, configFlipH, configFlipV, configQuality, configScale, configAlignH, configAlignV,].forEach(input => {
-      input.addEventListener("change", () => {
-        renderImage();
-      })
-    });
+    window.addEventListener("DOMContentLoaded", () => {
+      [configOrientation, configFlipH, configFlipV, configQuality, configScale, configAlignH, configAlignV].forEach(input => {
+        input.addEventListener("change", () => {
+          renderImage();
+        })
+      });
+    })
 
     function renderImage() {
-      console.log("--- キャンバス処理 ---");
+      console.log("--- デザイン処理 ---");
       const orientation = configOrientation.value;
       updateStyleClasses(orientation);
 
@@ -249,15 +291,16 @@
       render_canvas.height = h;
       mesh_preview_svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
 
-    // UIからスケールとアライメント設定を取得
-    const imgScale = parseFloat(configScale.value) || 0.5;
-    const hAlign = configAlignH.value;
-    const vAlign = configAlignV.value;
-    const flipH = configFlipH.checked;
-    const flipV = configFlipV.checked;
+      // UIからスケールとアライメント設定を取得
+      const imgScale = parseFloat(configScale.value) || 0.5;
+      const hAlign = configAlignH.value;
+      const vAlign = configAlignV.value;
+      const flipH = configFlipH.checked;
+      const flipV = configFlipV.checked;
 
-    // 画像描画 (サイズ、位置、反転のフラグを渡す)
-    drawImageWithScaleAndAlignment(source, render_canvas, imgScale, imgScale, hAlign, vAlign, flipH, flipV);
+      // 画像描画 (サイズ、位置、反転のフラグを渡す)
+      console.log("--- 画像描画処理 ---");
+      drawImageWithScaleAndAlignment(source, render_canvas, imgScale, imgScale, hAlign, vAlign, flipH, flipV);
     }
 
     buttonRender.addEventListener("click", () => {
@@ -600,7 +643,6 @@
       link.click();
     }
 
-    renderImage()
   </script>
 </body>
 
