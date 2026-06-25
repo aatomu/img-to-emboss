@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8">
-  <title>Image to Emboss (Smooth Marching Squares)</title>
+  <title>Image to Emboss (Full Pixel Scan Binary Tree)</title>
   <style>
     body {
       display: flex;
@@ -50,18 +50,17 @@
     <img id="source" src="./yuruyuru_atomu.svg" alt="Source Image">
   </div>
   <div class="box">
-    <span>Render Canvas</span>
+    <span>Render Canvas (Grayscale)</span>
     <canvas id="render_canvas"></canvas>
   </div>
   <div class="box">
-    <span>Mesh Wireframe (Dual Color Preview)</span>
+    <span>Mesh Wireframe Preview</span>
     <svg id="mesh_preview_svg"></svg>
   </div>
 
   <script>
     const canvas_width = 360;
     const canvas_height = 640;
-    const binarization_threshold = 128;
 
     const source = document.getElementById("source");
     const render_canvas = document.getElementById("render_canvas");
@@ -72,69 +71,253 @@
     mesh_preview_svg.setAttribute("viewBox", `0 0 ${canvas_width} ${canvas_height}`);
 
     function processImage() {
-      // 1. imgからcanvasに転写
+      console.log("--- 全ピクセル走査二分木 開始 ---");
       drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
-      // 2. 4分木によるメッシュ生成
-      const errorThresHold = 2;
-      const meshData = QuadtreeMesh(render_canvas, binarization_threshold, cellSizeSize);
-      console.log("Smooth Marching Squares メッシュデータ:", meshData);
 
-      // 3. プレビューの描画 (黒面＝濃いグレー、白面＝薄いグレーで視覚化)
+      // 許容エラー値としきい値
+      // 全ピクセルを走査するため、わずかなノイズも拾います。
+      // 線画のエッジをパキッとさせたい場合は 10〜20 あたりで微調整してください。
+      const errorThreshold = 15;
+      const minCellSize = 4;
+
+      const meshData = heightmapToBinaryTreeMesh(render_canvas, errorThreshold, minCellSize);
+      console.log("最終メッシュデータ:", meshData);
+
       drawMeshSVG(mesh_preview_svg, meshData);
 
-      // 4. 3Dデータ(OBJ)として書き出し
-      const blackMesh = { vertices: meshData.vertices, indices: meshData.blackIndices, name: "black" };
-      const whiteMesh = { vertices: meshData.vertices, indices: meshData.whiteIndices, name: "white" };
+      const baseHeight = 2.0;   // 土台の厚み (mm)
+      const maxHeight = 8.0;    // 凸部の最大高さ (mm)
+      const objText = exportToSolidOBJ(meshData, baseHeight, maxHeight);
 
-      // 厚みの設定：共通背面は Z=0。白（土台ベース）は 2.0mm、黒（浮き出るキャラ）は 10.0mm
-      const thicknessSettings = {
-        black: 10.0,
-        white: 2.0
-      };
-
-      const objText = exportToOBJ([blackMesh, whiteMesh], thicknessSettings);
-
-      // ダウンロード処理
-      download("exported_object_YYYYMMDD.obj",new Blob([objText], { type: "text/plain" }))
+      download("character_emboss_full_scan.obj", new Blob([objText], { type: "text/plain" }));
     }
 
-    source.onload = function () {
-      processImage();
-    };
-
-    if (source.complete) {
-      processImage();
-    }
+    source.onload = function () { processImage(); };
+    if (source.complete) { processImage(); }
 
     function drawImageWithScaleAndAlignment(img, canvas, wScale = 1.0, hScale = 1.0, hAlign = "center", vAlign = "middle") {
       const ctx = canvas.getContext("2d");
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       const scaledW = img.naturalWidth * wScale;
       const scaledH = img.naturalHeight * hScale;
       const canvasW = canvas.width;
       const canvasH = canvas.height;
 
-      let x = 0;
-      if (hAlign === "left") x = 0;
-      else if (hAlign === "center") x = (canvasW - scaledW) / 2;
-      else if (hAlign === "right") x = canvasW - scaledW;
-
-      let y = 0;
-      if (vAlign === "top") y = 0;
-      else if (vAlign === "middle") y = (canvasH - scaledH) / 2;
-      else if (vAlign === "bottom") y = canvasH - scaledH;
+      let x = (canvasW - scaledW) / 2;
+      let y = (canvasH - scaledH) / 2;
 
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(img, x, y, scaledW, scaledH);
+
+      const imgData = ctx.getImageData(0, 0, canvasW, canvasH);
+      const data = imgData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+        data[i] = gray; data[i + 1] = gray; data[i + 2] = gray;
+      }
+      ctx.putImageData(imgData, 0, 0);
+    }
+
+    function heightmapToBinaryTreeMesh(canvas, errorThreshold, minCellSize) {
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width;
+      const H = canvas.height;
+      const imgData = ctx.getImageData(0, 0, W, H).data;
+
+      function getSample(px, py) {
+        const cx = Math.max(0, Math.min(W - 1, Math.floor(px)));
+        const cy = Math.max(0, Math.min(H - 1, Math.floor(py)));
+        return imgData[(cy * W + cx) * 4 + 0];
+      }
+
+      const vertices = [];
+      const indices = [];
+      const vertexMap = new Map();
+
+      function getOrAddVertex(x, y) {
+        const sampleValue = getSample(x, y);
+        const heightValue = (255 - sampleValue) / 255.0;
+
+        const key = `${x.toFixed(1)},${y.toFixed(1)}`;
+        if (vertexMap.has(key)) {
+          return vertexMap.get(key);
+        }
+        const vIdx = vertices.length;
+        vertices.push({ x: x, y: y, h: heightValue });
+        vertexMap.set(key, vIdx);
+        return vIdx;
+      }
+
+      // ★修正: 領域内の全ピクセルを「1マスずつ漏れなく」完全走査する
+      function checkError(x, y, w, h) {
+        let minV = 255;
+        let maxV = 0;
+
+        // 切り捨てによる走査漏れを防ぐため、Math.ceilでカバーするピクセル範囲を確定
+        const startX = Math.floor(x);
+        const startY = Math.floor(y);
+        const endX = Math.min(W - 1, Math.ceil(x + w));
+        const endY = Math.min(H - 1, Math.ceil(y + h));
+
+        // ループのステップを「1」にし、全pixelをなめる
+        for (let py = startY; py <= endY; py++) {
+          for (let px = startX; px <= endX; px++) {
+            const val = imgData[(py * W + px) * 4 + 0];
+            if (val < minV) minV = val;
+            if (val > maxV) maxV = val;
+          }
+        }
+        return maxV - minV;
+      }
+
+      let callCount = 0;
+
+      function binaryTree(x, y, w, h) {
+        callCount++;
+
+        if (x >= W || y >= H || w <= 0 || h <= 0) return;
+
+        // 全ピクセル走査による正確な高低差エラーを取得
+        const error = checkError(x, y, w, h);
+
+        // どちらかの辺が minCellSize 以下、または領域内の全ピクセルが完全に平坦(error <= threshold)なら葉とする
+        if (error <= errorThreshold || (w <= minCellSize && h <= minCellSize)) {
+          // はみ出しをW, Hでクリップ
+          const actualW = Math.min(w, W - x);
+          const actualH = Math.min(h, H - y);
+          if (actualW <= 0 || actualH <= 0) return;
+
+          const idxTL = getOrAddVertex(x, y);
+          const idxTR = getOrAddVertex(x + actualW, y);
+          const idxBL = getOrAddVertex(x, y + actualH);
+          const idxBR = getOrAddVertex(x + actualW, y + actualH);
+
+          indices.push(idxTL, idxBL, idxTR);
+          indices.push(idxTR, idxBL, idxBR);
+          return;
+        }
+
+        // 長い方の辺を2等分
+        if (w >= h) {
+          const halfW = w / 2;
+          binaryTree(x, y, halfW, h);
+          binaryTree(x + halfW, y, halfW, h);
+        } else {
+          const halfH = h / 2;
+          binaryTree(x, y, w, halfH);
+          binaryTree(x, y + halfH, w, halfH);
+        }
+      }
+
+      // キャンバスの実寸(0, 0, 360, 640)からスタート
+      binaryTree(0, 0, W, H);
+      console.log(`二分木走査完了。全ピクセルチェックによる処理セル数: ${callCount}`);
+
+      return { vertices, indices, width: W, height: H };
+    }
+
+    function drawMeshSVG(svg, meshData) {
+      svg.innerHTML = "";
+      const fragment = document.createDocumentFragment();
+      const indices = meshData.indices;
+      const vertices = meshData.vertices;
+
+      for (let i = 0; i < indices.length; i += 3) {
+        const v0 = vertices[indices[i]];
+        const v1 = vertices[indices[i + 1]];
+        const v2 = vertices[indices[i + 2]];
+
+        const avgH = (v0.h + v1.h + v2.h) / 3;
+        const colorVal = Math.round(240 - (avgH * 140));
+        const fillColor = `rgb(${colorVal},${colorVal},${colorVal})`;
+
+        const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        polygon.setAttribute("points", `${v0.x},${v0.y} ${v1.x},${v1.y} ${v2.x},${v2.y}`);
+        polygon.setAttribute("fill", fillColor);
+        polygon.setAttribute("stroke", "#444444");
+        polygon.setAttribute("stroke-width", "0.2");
+        fragment.appendChild(polygon);
+      }
+      svg.appendChild(fragment);
+    }
+
+    function exportToSolidOBJ(meshData, baseHeight, maxHeight) {
+      let objLines = [];
+      objLines.push("# Exported Solid Binary Tree Emboss Block Mesh");
+
+      const vCount = meshData.vertices.length;
+      const H = meshData.height;
+
+      // 1. 表面
+      for (const v of meshData.vertices) {
+        const z = baseHeight + (maxHeight * v.h);
+        objLines.push(`v ${v.x.toFixed(4)} ${(H - v.y).toFixed(4)} ${z.toFixed(4)}`);
+      }
+
+      // 2. 裏面 (Z = 0.0 固定のソリッドベース)
+      for (const v of meshData.vertices) {
+        objLines.push(`v ${v.x.toFixed(4)} ${(H - v.y).toFixed(4)} 0.0000`);
+      }
+
+      objLines.push("");
+
+      // 3. 表面インデックス
+      objLines.push("# Top Surface");
+      for (let i = 0; i < meshData.indices.length; i += 3) {
+        objLines.push(`f ${meshData.indices[i] + 1} ${meshData.indices[i + 1] + 1} ${meshData.indices[i + 2] + 1}`);
+      }
+
+      // 4. 裏面インデックス (面を反転)
+      objLines.push("# Bottom Flat Surface");
+      for (let i = 0; i < meshData.indices.length; i += 3) {
+        const i0 = meshData.indices[i] + 1 + vCount;
+        const i1 = meshData.indices[i + 1] + 1 + vCount;
+        const i2 = meshData.indices[i + 2] + 1 + vCount;
+        objLines.push(`f ${i0} ${i2} ${i1}`);
+      }
+
+      // 5. 側面の壁の縫い合わせ
+      objLines.push("# Side Walls");
+      const edgeMap = new Map();
+      for (let i = 0; i < meshData.indices.length; i += 3) {
+        const tIdx = [meshData.indices[i], meshData.indices[i + 1], meshData.indices[i + 2]];
+        const pairs = [[tIdx[0], tIdx[1]], [tIdx[1], tIdx[2]], [tIdx[2], tIdx[0]]];
+        for (const p of pairs) {
+          const key = p[0] < p[1] ? `${p[0]}_${p[1]}` : `${p[1]}_${p[0]}`;
+          edgeMap.set(key, (edgeMap.get(key) || 0) + 1);
+        }
+      }
+
+      for (let i = 0; i < meshData.indices.length; i += 3) {
+        const tIdx = [meshData.indices[i], meshData.indices[i + 1], meshData.indices[i + 2]];
+        const pairs = [[tIdx[0], tIdx[1]], [tIdx[1], tIdx[2]], [tIdx[2], tIdx[0]]];
+
+        for (const p of pairs) {
+          const key = p[0] < p[1] ? `${p[0]}_${p[1]}` : `${p[1]}_${p[0]}`;
+          if (edgeMap.get(key) === 1) {
+            const topA = p[0] + 1;
+            const topB = p[1] + 1;
+            const botA = p[0] + 1 + vCount;
+            const botB = p[1] + 1 + vCount;
+
+            objLines.push(`f ${topA} ${botA} ${topB}`);
+            objLines.push(`f ${topB} ${botA} ${botB}`);
+          }
+        }
+      }
+
+      return objLines.join("\n");
     }
 
     function download(name, blob) {
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.download = "character_emboss_smooth.obj";
+      link.download = name;
       link.click();
     }
   </script>
+</body>
 
 </html>
