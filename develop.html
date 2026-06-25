@@ -35,14 +35,21 @@
     .box img,
     .box canvas,
     .box svg {
-      aspect-ratio: 9/16;
       width: calc(90vw / 4);
       image-rendering: pixelated;
       border: 2px solid black;
       background-color: white;
     }
 
-    /* 設定周りのレイアウトを少し整えるスタイルを追加 */
+    /* 縦横比はJS側で動的に制御するため、CSSからは固定比率を削除 */
+    .portrait {
+      aspect-ratio: 9/16;
+    }
+
+    .landscape {
+      aspect-ratio: 16/9;
+    }
+
     .config-container {
       display: flex;
       flex-direction: column;
@@ -60,6 +67,16 @@
       font-size: 0.9rem;
     }
 
+    .config-row {
+      display: flex;
+      flex-direction: row;
+      gap: 10px;
+    }
+
+    .config-row label {
+      font-size: 0.9rem;
+    }
+
     button {
       margin-top: 15px;
       padding: 8px;
@@ -71,19 +88,27 @@
 <body>
   <div class="box">
     <span>Source</span>
-    <img id="source" src="./yuruyuru_atomu.svg" alt="Source Image">
+    <img id="source" src="./yuruyuru_atomu.svg" alt="Source Image" class="portrait">
   </div>
   <div class="box">
     <span>Render Canvas (Grayscale)</span>
-    <canvas id="render_canvas"></canvas>
+    <canvas id="render_canvas" class="portrait"></canvas>
   </div>
   <div class="box">
     <span>Mesh Wireframe Preview</span>
-    <svg id="mesh_preview_svg"></svg>
+    <svg id="mesh_preview_svg" class="portrait"></svg>
   </div>
   <div class="box">
     <span>Config</span>
     <div class="config-container">
+      <div class="config-item">
+        <span>Orientation (縦横方向)</span>
+        <div class="config-row">
+          <label><input type="radio" name="config-orientation" value="portrait" checked> 縦向き (9:16)</label>
+          <label><input type="radio" name="config-orientation" value="landscape"> 横向き (16:9)</label>
+        </div>
+      </div>
+
       <div class="config-item">
         <span>Image quality</span>
         <select id="config-quality">
@@ -93,28 +118,51 @@
           <option value="1080">1080p/FHD(Heavy/High Quality)</option>
         </select>
       </div>
+
       <div class="config-item">
-        <span>Noise threshold</span>
+        <span>Image Scale / 描画サイズ倍率</span>
+        <input type="number" id="config-scale" min="0.1" max="10.0" step="0.1" value="0.5">
+      </div>
+
+      <div class="config-item">
+        <span>Horizontal Alignment / 横位置</span>
+        <select id="config-align-h">
+          <option value="left">Left</option>
+          <option value="center" selected>Center</option>
+          <option value="right">Right</option>
+        </select>
+      </div>
+      <div class="config-item">
+        <span>Vertical alignment / 縦位置</span>
+        <select id="config-align-v">
+          <option value="top">Top</option>
+          <option value="middle" selected>Middle</option>
+          <option value="bottom">Bottom</option>
+        </select>
+      </div>
+
+      <div class="config-item">
+        <span>Noise threshold / ノイズ閾値</span>
         <input type="number" id="config-threshold" min="1" step="1" value="15">
       </div>
       <div class="config-item">
-        <span>Minimum cell size</span>
+        <span>Minimum cell size / 最小解析サイズ</span>
         <input type="number" id="config-min_cell" min="1" step="1" value="4">
       </div>
       <div class="config-item">
-        <span>Model base height(mm)</span>
+        <span>Model base height / ベースの厚さ (mm)</span>
         <input type="number" id="config-base_h" min="1" step="0.1" value="20.0">
       </div>
       <div class="config-item">
-        <span>Model bump height(mm)</span>
+        <span>Model bump height / 凸凹の高さ (mm)</span>
         <input type="number" id="config-bump_h" min="1" step="0.1" value="5.0">
       </div>
       <div class="config-item">
-        <span>Export height(mm)</span>
+        <span>Export height / ベースの高さ (mm)</span>
         <input type="number" id="config-exp_h" min="1" step="1" value="160">
       </div>
       <div class="config-item">
-        <span>Export width(mm)</span>
+        <span>Export width / ベースの幅 (mm)</span>
         <input type="number" id="config-exp_w" min="1" step="1" value="90">
       </div>
       <button id="button_render">Render Image</button>
@@ -122,8 +170,8 @@
     </div>
   </div>
   <script>
-    // 解像度マッピング (9:16を維持)
-    const qualityMap = {
+    // 基本の解像度マッピング（縦向き基準）
+    const baseQualityMap = {
       "360": { w: 360, h: 640 },
       "480": { w: 480, h: 854 },
       "720": { w: 720, h: 1280 },
@@ -134,37 +182,84 @@
     const render_canvas = document.getElementById("render_canvas");
     const mesh_preview_svg = document.getElementById("mesh_preview_svg");
 
-    // 保存用グローバル変数
     let calculatedMeshData = null;
 
     // 入力要素の取得
     const configQuality = document.getElementById("config-quality");
+    const configScale = document.getElementById("config-scale");
+    const configAlignH = document.getElementById("config-align-h");
+    const configAlignV = document.getElementById("config-align-v");
     const configThreshold = document.getElementById("config-threshold");
     const configMinCell = document.getElementById("config-min_cell");
     const configBaseH = document.getElementById("config-base_h");
     const configBumpH = document.getElementById("config-bump_h");
     const buttonRender = document.getElementById("button_render");
     const buttonExport = document.getElementById("button_export");
+    const configOrientations = document.getElementsByName("config-orientation");
 
-    function updateCanvasSize() {
-      const q = qualityMap[configQuality.value] || { w: 360, h: 640 };
-      render_canvas.width = q.w;
-      render_canvas.height = q.h;
-      mesh_preview_svg.setAttribute("viewBox", `0 0 ${q.w} ${q.h}`);
+    // 選択されている縦横方向を取得
+    function getOrientation() {
+      for (const radio of configOrientations) {
+        if (radio.checked) return radio.value;
+      }
+      return "portrait";
     }
 
+    // 画面のクラスとアスペクト比を同期
+    function updateStyleClasses(orientation) {
+      const targets = [source, render_canvas, mesh_preview_svg];
+      targets.forEach(el => {
+        if (orientation === "portrait") {
+          el.classList.remove("landscape");
+          el.classList.add("portrait");
+        } else {
+          el.classList.remove("portrait");
+          el.classList.add("landscape");
+        }
+      });
+    }
+
+    function updateCanvasSize() {
+      const orientation = getOrientation();
+      updateStyleClasses(orientation);
+
+      const baseQ = baseQualityMap[configQuality.value] || { w: 360, h: 640 };
+
+      // 横向き(landscape)なら幅と高さを反転
+      let w = baseQ.w;
+      let h = baseQ.h;
+      if (orientation === "landscape") {
+        w = baseQ.h;
+        h = baseQ.w;
+      }
+
+      render_canvas.width = w;
+      render_canvas.height = h;
+      mesh_preview_svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    }
+
+    // ラジオボタン切り替え時に見た目・解像度を即時プレビュー反映用
+    configOrientations.forEach(radio => {
+      radio.addEventListener("change", updateCanvasSize);
+    });
+    configQuality.addEventListener("change", updateCanvasSize);
+
     buttonRender.addEventListener("click", () => {
-      processImage()
-    })
+      processImage();
+    });
 
     function processImage() {
       console.log("--- 全ピクセル走査二分木 開始 ---");
 
-      // 設定に合わせてキャンバスサイズを動的変更
       updateCanvasSize();
 
-      // 画像描画
-      drawImageWithScaleAndAlignment(source, render_canvas, 0.45, 0.45, "center", "middle");
+      // UIからスケールとアライメント設定を取得
+      const imgScale = parseFloat(configScale.value) || 0.5;
+      const hAlign = configAlignH.value;
+      const vAlign = configAlignV.value;
+
+      // 画像描画 (サイズ倍率とアライメントを渡す)
+      drawImageWithScaleAndAlignment(source, render_canvas, imgScale, imgScale, hAlign, vAlign);
 
       // inputから動的に数値を読み込み (型変換を行う)
       const errorThreshold = parseFloat(configThreshold.value) || 15;
@@ -202,8 +297,25 @@
       const canvasW = canvas.width;
       const canvasH = canvas.height;
 
-      let x = (canvasW - scaledW) / 2;
-      let y = (canvasH - scaledH) / 2;
+      // 横位置 (Horizontal Alignment) の計算
+      let x = 0;
+      if (hAlign === "left") {
+        x = 0;
+      } else if (hAlign === "right") {
+        x = canvasW - scaledW;
+      } else {
+        x = (canvasW - scaledW) / 2; // center
+      }
+
+      // 縦位置 (Vertical Alignment) の計算
+      let y = 0;
+      if (vAlign === "top") {
+        y = 0;
+      } else if (vAlign === "bottom") {
+        y = canvasH - scaledH;
+      } else {
+        y = (canvasH - scaledH) / 2; // middle
+      }
 
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(img, x, y, scaledW, scaledH);
